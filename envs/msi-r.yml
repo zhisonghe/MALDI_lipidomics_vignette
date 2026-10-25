@@ -1,0 +1,24 @@
+# R environment for the Bioconductor/CRAN alternative pipeline (Cardinal 3, MALDIquant).
+#
+# Linux x86_64 and Intel macOS:
+#   mamba env create -f envs/msi-r.yml
+#   (installs Cardinal from bioconda; solves on linux-64 and osx-64)
+#
+# Apple Silicon (osx-arm64): bioconda has no arm64 build of bioconductor-cardinalio, which Cardinal needs,
+# so this file does NOT solve there. Remove the `bioconductor-cardinal` line below (or use R from CRAN),
+# then install Cardinal from Bioconductor's own arm64 binaries inside R:
+#   BiocManager::install("Cardinal")
+# (tested: Cardinal 3.14.0 with R 4.6.1 on macOS arm64)
+name: msi-r
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - r-base>=4.4
+  - r-biocmanager
+  - r-maldiquant
+  - r-maldiquantforeign
+  - r-lme4
+  - r-ggplot2
+  - r-irkernel
+  - bioconductor-cardinal

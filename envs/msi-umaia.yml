@@ -1,0 +1,21 @@
+# Base environment for uMAIA (peak calling, cross-section matching, normalization).
+# Versions follow the pins in https://github.com/lamanno-epfl/uMAIA (requirements.txt, README).
+# Create with:   mamba env create -f envs/msi-umaia.yml
+# Then install uMAIA itself in developer mode (see Tutorial section 1-4). uMAIA pins jaxlib==0.4.14,
+# which is no longer on PyPI, so point pip at Google's JAX archive:
+#   pip install --no-build-isolation --no-cache-dir -e . \
+#       -f https://storage.googleapis.com/jax-releases/jax_releases.html
+# Tested on macOS arm64; the same pins resolve on macOS x86_64 and Linux x86_64.
+name: msi-umaia
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11.3
+  - pip=25.1.1
+  - setuptools=80.9.0
+  - wheel=0.45.1
+  - cython=3.1.2
+  - git
+  - pip:
+      - numcodecs==0.12.0
+      - py-cpuinfo==9.0.0

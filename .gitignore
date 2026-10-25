@@ -1,0 +1,15 @@
+# Data are downloaded separately (see Tutorial.md 1-5); never commit imzML/IBD or processed objects
+*.imzML
+*.imzml
+*.ibd
+*.IBD
+*.h5ad
+*.zarr/
+rawData/
+data/
+
+# Caches and system files
+__pycache__/
+*.pyc
+.DS_Store
+.ipynb_checkpoints/

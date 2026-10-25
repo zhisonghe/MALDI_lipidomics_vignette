@@ -1,0 +1,45 @@
+# General-purpose Python environment for QC, registration, annotation helpers and downstream analysis
+# (not pinned to EUCLID/uMAIA versions).
+# Create with:   mamba env create -f envs/msi-analysis.yml
+# Then install STalign WITHOUT its dependencies (its requirements.txt pins numpy==1.23.4 and PIMS==0.3.0,
+# which cannot be installed on Python 3.12 on any OS):
+#   pip install --no-deps git+https://github.com/JEFworks-Lab/STalign.git
+# Solves on macOS arm64, macOS x86_64 and Linux x86_64. On Intel Macs, pip falls back to older
+# TensorFlow (2.16, for DeepSlice) because newer TensorFlow builds no longer support macOS x86_64.
+name: msi-analysis
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy
+  - scipy
+  - pandas
+  - pyarrow
+  - scikit-learn
+  - scikit-image
+  - statsmodels
+  - matplotlib
+  - seaborn
+  - zarr
+  - anndata
+  - scanpy
+  - squidpy
+  - leidenalg
+  - python-igraph
+  - xgboost
+  - pytorch
+  - opencv
+  - napari
+  - pynrrd
+  - jupyterlab
+  - pip
+  - pip:
+      - pyimzML
+      - metaspace2020
+      - pygoslin
+      - harmonypy
+      - openTSNE
+      - brainglobe-atlasapi
+      - spatialdata==0.8.0   # needs zarr >= 3 (see tutorial 2-9)
+      - DeepSlice
+      - linex2

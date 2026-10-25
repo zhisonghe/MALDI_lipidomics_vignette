@@ -1,0 +1,33 @@
+# Environment for EUCLID (feature selection, NMF embedding, Harmony, lipizone clustering,
+# feature restoration, case-control models). EUCLID v0.0.6 pins exact versions of its direct dependencies
+# (see pyproject.toml in https://github.com/lamanno-epfl/EUCLID), but not of their dependencies. Without
+# extra constraints, a fresh install today pulls incompatible versions (xarray-dataclasses, imbalanced-learn,
+# setuptools/pkg_resources) and `import euclid_msi` fails. euclid-constraints.txt fixes these versions.
+# The relative path in `-c euclid-constraints.txt` below is resolved relative to this file (conda runs pip from
+# the directory of the environment file), so the command works from any directory.
+# Create with (from the repository root):
+#   mamba env create -f envs/msi-euclid.yml
+# Tested on macOS arm64; resolves identically on macOS x86_64 and Linux x86_64.
+# On Apple Silicon, brotlipy is compiled from source (needs Xcode command line tools: xcode-select --install).
+name: msi-euclid
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - cxx-compiler
+  - pyarrow
+  - pyzmq
+  - jupyterlab
+  - ipykernel
+  # geospatial stack needed on macOS (per EUCLID README)
+  - proj
+  - pyproj
+  - shapely
+  - fiona
+  - rtree
+  - geopandas
+  - pip
+  - pip:
+      - -c euclid-constraints.txt
+      - euclid-msi==0.0.6
+      - tables
