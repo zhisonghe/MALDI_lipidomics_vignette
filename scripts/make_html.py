@@ -5,7 +5,7 @@ Needs markdown-it-py (3.0) and mdit-py-plugins (0.4). Figures from figures/ are 
 is a single file. The default output is a standalone HTML document; --fragment additionally writes the same page
 without the <html>/<head>/<body> skeleton (for hosts that add their own).
 """
-import base64, html, os, re, sys
+import base64, html, os, re, subprocess, sys
 from markdown_it import MarkdownIt
 from mdit_py_plugins.anchors import anchors_plugin
 
@@ -55,6 +55,21 @@ for level, hid, text in re.findall(r'<h([23]) id="([^"]+)">(.*?)</h\1>', html_bo
     toc.append(f'<li class="l{level}"><a href="#{hid}">{text}</a></li>')
 toc_html = "\n".join(toc)
 n_sections = sum(1 for t in toc if 'class="l3"' in t)
+
+
+def git(*cmd):
+    try:
+        return subprocess.run(["git", "-C", base, *cmd], capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+
+
+# version stamp: the last commit that changed the Markdown source, and whether it has uncommitted edits
+name = os.path.basename(src)
+commit, date = git("log", "-1", "--format=%h", "--", name), git("log", "-1", "--format=%cs", "--", name)
+dirty = bool(git("status", "--porcelain", "--", name))
+version = (f"version {commit} ({date}){' + uncommitted changes' if dirty else ''}" if commit else "")
+print("version stamp:", version or "none (not a git repository)")
 
 PAGE = """<title>MALDI-MSI Lipidomics Tutorial</title>
 <meta name="claude:viewport-fit-sides" content="cover">
@@ -162,7 +177,7 @@ __TOC__
       <header class="masthead">
         <p class="eyebrow">MALDI-MSI &middot; spatial lipidomics &middot; m/z, pixels and lipids</p>
         <h1>__TITLE__</h1>
-        <p class="meta">__SUBTITLE__ &middot; __NSEC__ sections &middot; companion files: <code>envs/</code>, <code>scripts/</code>, <code>figures/</code></p>
+        <p class="meta">__SUBTITLE__ &middot; __VERSION__ &middot; __NSEC__ sections &middot; companion files: <code>envs/</code>, <code>scripts/</code>, <code>figures/</code></p>
         <details class="toc-mobile"><summary>Contents</summary><ul>
 __TOC__
         </ul></details>
@@ -202,7 +217,7 @@ __BODY__
 </script>
 """
 page = (PAGE.replace("__TOC__", toc_html).replace("__TITLE__", html.escape(title))
-        .replace("__SUBTITLE__", html.escape(subtitle)).replace("__NSEC__", str(n_sections)).replace("__BODY__", html_body))
+        .replace("__SUBTITLE__", html.escape(subtitle)).replace(" &middot; __VERSION__", f" &middot; {html.escape(version)}" if version else "").replace("__NSEC__", str(n_sections)).replace("__BODY__", html_body))
 if frag:
     open(frag, "w", encoding="utf-8").write(page)
 head, rest = page.split("<style>", 1)
