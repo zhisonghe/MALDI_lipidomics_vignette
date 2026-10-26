@@ -236,6 +236,7 @@ Several calls in this tutorial behave differently, or fail, depending on the ins
 | squidpy | `sq.gr.spatial_neighbors(..., coord_type="grid")` (2-5) | Deprecated since 1.7 and announced for removal in 1.9, replaced by `sq.gr.spatial_neighbors_grid`. The grid default is `n_neighs=6` (hexagonal Visium spots); on a square MSI raster the built-in distance correction gives 4 neighbours (tested with 1.8.3), but this is implicit | Always pass `n_neighs=4` (rook) or `n_neighs=8` (queen) explicitly; with squidpy >= 1.7 use `sq.gr.spatial_neighbors_grid(ad, n_neighs=4)`. EUCLID 0.0.6 pins squidpy 1.5.0 |
 | STalign | `STalign.LDDMM`, `transform_points_source_to_target` (2-7) | Version 2.0 (Oct 2026) keeps the API (the result is still a dict with `"A"`, `"v"`, `"xv"`) but changes defaults: affine pre-fit, `sigmaR` and step sizes chosen from the data, `niter` 2000 by default, exact inverse for source-to-target transforms. Results differ from 1.0 | To reproduce 1.x results (e.g. the LBA): `LDDMM(..., legacy_defaults=True)` and `transform_points_source_to_target(..., exact_inverse=False)`, or install `@v1.0.1`. The unpinned install command in this section gets the newest version |
 | scanpy | `sc.tl.leiden(..., flavor="igraph", n_iterations=2)` (3-3) | `flavor` exists from scanpy 1.10; the default backend is moving from `leidenalg` to `igraph` | With scanpy < 1.10 drop `flavor` and `n_iterations`; set `random_state` in all versions |
+| scanpy | `sc.pp.combat(..., covariates=...)` (2-6) | Tested with 1.12: categorical covariates are coded with one column per level next to one column per batch, which makes the design singular | Pass covariates as numeric 0/1 columns, e.g. from `formulaic.model_matrix("~ condition", meta)` without the intercept |
 | harmonypy | `run_harmony(...).Z_corr` (3-2) | Orientation (components x cells or cells x components) differs between versions | Check the shape against `(n_obs, n_components)` as in the code of 3-2 |
 | zarr | `uMAIA.ut.tools.to_zarr`, `to_zarr_normalised` (2-4, 2-6); reading the stores (2-5, 2-9) | uMAIA writes with the zarr 2 API (`create_dataset`), which zarr 3 removed; uMAIA pins zarr 2.16.0, EUCLID's constraints 2.14.2, `msi-analysis` is unpinned (zarr 3) | Write the stores in `msi-umaia`. Reading them (`zarr.open`, `group_keys()`, `array_keys()`) works with both zarr 2 and 3. SpatialData (2-9) requires zarr 3, so keep it in `msi-analysis` |
 | scikit-image | `remove_small_objects(min_size=)`, `remove_small_holes(area_threshold=)` | Deprecated in 0.26 in favour of `max_size` (which removes objects of size <= instead of <); `max_size` does not exist before 0.26 | The mask code in 2-2 uses `scipy.ndimage`, which is version-independent |
@@ -284,7 +285,14 @@ The LBA data are distributed at several levels of processing:
 >**NOTE**
 >METASPACE currently disables downloads of this project via its API (the Python client returns "Download disabled on API. Please use the web interface"). Download individual imzML files from the web interface: open the data set, click on *Download* on the data set page.
 
-A generic helper to download all files of a Zenodo record (used by the EUCLID tutorial as well):
+To download all files of a Zenodo record, use [zenodo_get](https://github.com/dvolgyes/zenodo_get) (`pip install zenodo_get`, in any environment; tested with 3.1.0). It verifies every file against the checksum Zenodo publishes, deletes damaged files and resumes interrupted downloads:
+
+```console
+for rec in 15650014 16524009 16521812; do zenodo_get $rec -o .; done    # EUCLID tutorial inputs
+zenodo_get 8410583 -o rawData -g '*fish2_section2[246]*'               # -g selects files, e.g. the zebrafish sections above
+```
+
+The same in plain Python, without the extra package (the Zenodo API lists the files of a record with their checksums):
 
 ```python
 import hashlib, os, requests
@@ -317,7 +325,7 @@ for rec in ["15650014", "16524009", "16521812"]:   # EUCLID tutorial inputs
     download_zenodo(rec)
 ```
 
-and then `tar -xzf LipidAtlas_uMAIA_subset.tar.gz; tar -xzf LipidAtlas_masks.tar.gz`.
+In both cases, then run `tar -xzf LipidAtlas_uMAIA_subset.tar.gz; tar -xzf LipidAtlas_masks.tar.gz`.
 
 ## Preprocessing of MALDI-MSI data
 <sub><a href="#top">(Back to top)</a></sub></br>
@@ -432,6 +440,8 @@ if np.count_nonzero(sig > 0) < 100:
 mask = sig > threshold_otsu(sig[sig > 0])
 min_piece = int(np.ceil(0.1e6 / pixel_um**2))   # keep tissue pieces >= 0.1 mm^2
 max_hole = int(np.ceil(0.01e6 / pixel_um**2))   # fill holes < 0.01 mm^2 (pinholes), not cavities
+# skimage.morphology.remove_small_objects / remove_small_holes do the same, but their size arguments changed in
+# scikit-image 0.26 (see "Version-sensitive calls"); the few lines of scipy.ndimage below work in every version
 lab, _ = ndi.label(mask); size = np.bincount(lab.ravel()); size[0] = 0
 mask = (size >= min_piece)[lab]
 lab, _ = ndi.label(~mask); size = np.bincount(lab.ravel()); size[0] = 0
@@ -625,7 +635,7 @@ The resulting Zarr store has one group per matched feature, named by its mean m/
 
 #### Alternatives
 * **Cardinal**: read all sections into one `MSImagingArrays` (`readMSIData` on each file, then `combine()`), run `peakProcess()` on the combined object so that reference peaks are estimated jointly, or `peakAlign()` with a common tolerance.
-* **ppm clustering of peak centres**: with a handful of acquisitions and good mass accuracy (measured in 2-2), matching is a simple one-dimensional problem and does not need an integer program or a Gurobi license. Pool the peak centres of all acquisitions, sort them, and start a new feature wherever two neighbouring centres are more than a tolerance apart:
+* **ppm clustering of peak centres**: with a handful of acquisitions and good mass accuracy (measured in 2-2), matching is a simple one-dimensional problem and does not need an integer program or a Gurobi license. In R, `MALDIquant::binPeaks()` and Cardinal's `peakAlign()` do this grouping; Python has no commonly used function for it, so here it is in a few lines. Pool the peak centres of all acquisitions, sort them, and start a new feature wherever two neighbouring centres are more than a tolerance apart:
   ```python
   import numpy as np, pandas as pd
 
@@ -770,7 +780,7 @@ intervals = consensus_intervals(matches, acquisitions)
 adatas = {a: requantify(f"rawData/{a}/{a}.imzml", intervals[intervals.acq == a]) for a in acquisitions}
 ```
 
-The result contains raw (not TIC-divided) intensities, which feed the pixel-level normalization of 2-6; `var["called"]` keeps track of where a feature was originally called, and `obsm["low_centroid"]` holds a diagnostic of how low the retained centroids go in each m/z window of each pixel (used in 2-6). The same functions are in `scripts/gapfill.py`. Within uMAIA, you can do the same by calling `save_images(smz, df=..., normalization=None)` (2-3) with each acquisition's rows of `intervals`.
+The result contains raw (not TIC-divided) intensities, which feed the pixel-level normalization of 2-6; `var["called"]` keeps track of where a feature was originally called, and `obsm["low_centroid"]` holds a diagnostic of how low the retained centroids go in each m/z window of each pixel (used in 2-6). The same functions are in `scripts/gapfill.py`. The summation itself exists in the common tools: within uMAIA, call `save_images(smz, df=..., normalization=None)` (2-3) with each acquisition's rows of `intervals`; in Cardinal, `peakPick(ref=...)` or `peakProcess(ref=...)` extract given m/z values from every spectrum. `requantify()` is kept here because it also records the full-spectrum TIC and the low-centroid diagnostic of 2-6, which neither of them provides.
 
 Requantification cannot recover signal that the instrument did not centroid: values below the centroiding threshold remain zero (see 2-6). A requantified value where the feature was not called is signal in the expected window, not a confirmed peak; inspect a few such images and spectra, especially where intervals of neighbouring features were cut.
 
@@ -856,7 +866,7 @@ keep = (frac_per_group >= 0.5).any(axis=0)
 print(keep.sum(), "of", len(keep), "features kept")
 ```
 
-To remove isotopes, a simple rule is a reasonable start for lipids: a feature at m/z M is flagged as an isotope if there is another feature at M - 1.00336 (13C) within 5 ppm, whose image is highly correlated (Pearson r > 0.8 over tissue pixels) and more intense. This is a heuristic: for carbon-rich lipids the [M+1] peak reaches 40-60% of [M+0], an [M+2] peak (mainly molecules with two 13C atoms, plus contributions from 18O and other isotopes) can overlap with the [M+0] of another lipid (e.g. the two-13C [M+2] of PC 34:2 and PC 34:1 [M+H]+ are 9 mDa apart, separable only at high resolving power), and co-localized lipids can be correlated without being isotopes. A more robust check compares the observed intensity ratio with the ratio expected from the candidate formula. Ambiguous overlaps are better flagged in the feature table than removed. Redundant adducts can be found analogously with the mass differences Na-H (21.98194) and K-H (37.95588).
+To remove isotopes, a simple rule is a reasonable start for lipids: a feature at m/z M is flagged as an isotope if there is another feature at M - 1.00336 (13C) within 5 ppm, whose image is highly correlated (Pearson r > 0.8 over tissue pixels) and more intense. This is a heuristic: for carbon-rich lipids the [M+1] peak reaches 40-60% of [M+0], an [M+2] peak (mainly molecules with two 13C atoms, plus contributions from 18O and other isotopes) can overlap with the [M+0] of another lipid (e.g. the two-13C [M+2] of PC 34:2 and PC 34:1 [M+H]+ are 9 mDa apart, separable only at high resolving power), and co-localized lipids can be correlated without being isotopes. A more robust check compares the observed intensity ratio with the ratio expected from the candidate formula. Ambiguous overlaps are better flagged in the feature table than removed. Redundant adducts can be found analogously with the mass differences Na-H (21.98194) and K-H (37.95588). Existing deisotoping tools work on spectra, not on images: `MALDIquant::monoisotopicPeaks()` (R) or the `Deisotoper` of pyOpenMS (the Python interface of the widely used OpenMS library), applied to the mean spectrum, find isotope series from the expected intensity pattern. They can replace the m/z and ratio part of the rule; the image correlation has to be added, because it is specific to imaging.
 
 >**NOTE**
 >Filtering on "annotatability" before normalization is a strong choice: it throws away everything that is not in a database. That is fine for a lipid atlas, but it prevents the discovery of unknown molecules. For exploratory work, keep unannotated but spatially structured features and annotate later.
@@ -887,7 +897,16 @@ A pipeline usually combines one pixel-level and one cross-sample method. The key
 There is no universally best method. Where possible, compare two or three choices and check that conclusions do not depend on them.
 
 #### Pixel-level normalization on curated features
-The full-spectrum TIC also contains matrix and noise centroids. When acquisitions differ in noise level, their TICs differ for reasons that have nothing to do with the tissue, and so do the normalized values. Compute the normalization factor only over the features that passed the QC of 2-5, using raw (not yet TIC-divided) images (see 2-3 for how to get them from uMAIA). Rescale by **one global constant** (the median over all tissue pixels of all samples), not by a per-sample constant, so that values stay on the same scale across samples:
+The full-spectrum TIC also contains matrix and noise centroids. When acquisitions differ in noise level, their TICs differ for reasons that have nothing to do with the tissue, and so do the normalized values. Compute the normalization factor only over the features that passed the QC of 2-5, using raw (not yet TIC-divided) images (see 2-3 for how to get them from uMAIA). Rescale by **one global constant** (the median over all tissue pixels of all samples), not by a per-sample constant, so that values stay on the same scale across samples. In scanpy this is `normalize_total` with `target_sum=None`: each pixel is divided by its total and multiplied by the median total of all pixels (pixels with a total of 0 are left out of the median):
+
+```python
+import scanpy as sc
+# adata: tissue pixels of all samples x curated features, raw summed intensities in adata.X (dense or sparse)
+adata.layers["raw"] = adata.X.copy()                # keep the measured values (2-9)
+sc.pp.normalize_total(adata, target_sum=None)       # X = raw / TIC over the curated features x median TIC
+```
+
+The same by hand, together with RMS and PQN normalization, for which scanpy has no function:
 
 ```python
 import numpy as np
@@ -1050,7 +1069,23 @@ Xn = apply_factors(X, sample, f[features])
 ```
 
 #### Cross-sample: model-based per-feature batch correction
-If conditions are distributed over slides (each slide contains samples of several conditions, and each condition is on several slides), the slide effect of each feature can be estimated with a linear model on the log pseudo-bulk that includes the condition, so that the condition effect is not removed. This is the logic of limma's `removeBatchEffect` and of ComBat, which additionally shrinks the per-feature batch estimates by empirical Bayes and is preferable when there are few samples per slide (Python implementations: pyComBat in the `inmoose` package; `sc.pp.combat` works on AnnData but, applied to pixels, would treat differences in tissue composition between slides as batch effects).
+If conditions are distributed over slides (each slide contains samples of several conditions, and each condition is on several slides), the slide effect of each feature can be estimated with a linear model on the log pseudo-bulk that includes the condition, so that the condition effect is not removed. This is the logic of limma's `removeBatchEffect` and of ComBat, which additionally shrinks the per-feature batch estimates by empirical Bayes and is preferable when there are few samples per slide (Python implementations: `sc.pp.combat` in scanpy, and pyComBat in the `inmoose` package). Apply it to the pseudo-bulk profiles, not to the pixels: on pixels, differences in tissue composition between slides would be treated as batch effects.
+
+With scanpy's ComBat on the log pseudo-bulk of the anchor features (ComBat does not accept missing values):
+
+```python
+import anndata as ad, scanpy as sc
+from formulaic import model_matrix
+
+cov = model_matrix("~ condition", meta).drop(columns="Intercept")     # 0/1 columns; add e.g. "+ sex" if needed
+P = ad.AnnData(LA.to_numpy(copy=True), obs=cov.assign(slide=meta["slide"].astype("category")))
+sc.pp.combat(P, key="slide", covariates=list(cov.columns))           # covariates are protected from removal
+logf = (pd.DataFrame(P.X, index=LA.index, columns=LA.columns) - LA).reindex(columns=L.columns, fill_value=0.0)
+Xn = apply_factors(X, sample, np.exp(logf))
+```
+Pass the covariates as numeric columns, as above. Given a categorical column, scanpy (tested with 1.12) codes every level of it next to every level of the batch, so the columns of each set sum to one and the design matrix is not of full rank ("Singular matrix"). `model_matrix` from formulaic (the formula library used by statsmodels) gives the usual treatment coding, with one level dropped. Features that are not detected in every sample keep factor 1 here.
+
+The linear model behind it, without the shrinkage, can be fitted per feature with statsmodels. It also handles features that are missing from some samples:
 
 ```python
 import statsmodels.formula.api as smf
@@ -1070,7 +1105,7 @@ for feat in L.columns:
     logf.loc[d.index, feat] = -b.loc[d["slide"]].values
 Xn = apply_factors(X, sample, np.exp(logf))
 ```
-Features that are not detected in a sample keep factor 1 there (their pixels are zero anyway). Because a feature missing from some slides is centred on the slides where it was measured, its correction is relative to a slightly different reference than that of other features. Add other technical covariates (run, day) in the same way if they are not nested in the slide. For differential testing, prefer putting the same terms into the test model (3-6) over testing corrected values; use the corrected matrix for visualization and clustering. With few samples per slide, use ComBat-style shrinkage or a single global factor per slide instead.
+Features that are not detected in a sample keep factor 1 there (their pixels are zero anyway). Because a feature missing from some slides is centred on the slides where it was measured, its correction is relative to a slightly different reference than that of other features. Add other technical covariates (run, day) in the same way if they are not nested in the slide. For differential testing, prefer putting the same terms into the test model (3-6) over testing corrected values; use the corrected matrix for visualization and clustering. With few samples per slide, use ComBat (above) or a single global factor per slide instead.
 
 #### Cross-sample: quantile normalization of pseudo-bulk profiles
 This extends the global scaling factor to an intensity-dependent correction, without assuming that any individual lipid has the same level in all samples:
@@ -1297,7 +1332,35 @@ ann = ds.results(database=("LipidMaps", "2017-12-12"), fdr=0.1)
 (Database names and versions change over time; `sm.databases()` lists the current ones.)
 
 #### Matching against your own reference list
-With a list of lipids expected in your samples (e.g. from LC-MS of the same tissue, or generated from class rules as in `scripts/lipid_reference.py`), annotation is a ppm comparison of each feature's m/z with the theoretical m/z of each lipid ion. It is transparent, needs no upload, and is the basis of the tolerance diagnostics below:
+With a list of lipids, annotation is a ppm comparison of each feature's m/z with the theoretical m/z of each lipid ion. It is transparent, needs no upload, and is the basis of the tolerance diagnostics below.
+
+The standard list is the LIPID MAPS Structure Database (LMSD): ~50,000 curated lipids, downloadable as one SDF file, with formula, exact mass and the sum-composition abbreviation (e.g. `PC 34:1`) of each entry. Collapse it to sum compositions and keep only the classes you expect in your samples: LMSD also contains plant, bacterial and synthetic lipids, which only add chance matches. LMSD is updated continuously, so record the download date. A list from LC-MS of the same samples, if available, is better still. Class rules (as in `scripts/lipid_reference.py`) are an alternative that needs no download: they generate every chain length and number of double bonds in a range, including species that are unlikely to exist, and make it obvious what the reference contains.
+
+```console
+curl -L -o LMSD.sdf.zip "https://www.lipidmaps.org/files/?file=LMSD&ext=sdf.zip" && unzip LMSD.sdf.zip    # structures.sdf
+```
+```python
+import pandas as pd
+
+def read_sdf_fields(path):
+    """Data fields of an SDF file, one dict per structure (RDKit's PandasTools.LoadSDF also parses the structures)."""
+    recs, cur, key = [], {}, None
+    for line in open(path, encoding="utf-8", errors="replace"):
+        if line.startswith("$$$$"):
+            recs.append(cur); cur, key = {}, None
+        elif line.startswith("> <"):
+            key = line[3:line.index(">", 3)]
+        elif key and line.strip():
+            cur[key] = line.strip(); key = None
+    return pd.DataFrame(recs)
+
+lm = read_sdf_fields("structures.sdf").dropna(subset=["ABBREVIATION", "FORMULA", "EXACT_MASS"])
+lm["class"] = lm["ABBREVIATION"].str.replace(r"\s*\d+:\d+.*$", "", regex=True)     # "PC O-36:2" -> "PC O-"
+expected = ["PC", "PC O-", "PE", "PE O-", "PS", "PI", "PG", "PA", "LPC", "LPE", "SM", "Cer", "HexCer", "DG", "TG", "CE"]
+ref = (lm[lm["class"].isin(expected)].drop_duplicates(["ABBREVIATION", "FORMULA"])
+         .assign(name=lambda d: d["ABBREVIATION"], exact_mass=lambda d: d["EXACT_MASS"].astype(float)))
+print(len(ref), "sum compositions")          # 2,187 for these 16 classes (LMSD of October 2026)
+```
 ```python
 import numpy as np, pandas as pd
 

@@ -1,4 +1,7 @@
-"""Sum-composition reference of common lipid classes, generated from headgroup formula rules.
+"""Lipid references for MS1 annotation (tutorial 2-8): the LIPID MAPS Structure Database (LMSD), collapsed to sum
+compositions, or a reference generated from headgroup formula rules.
+
+LMSD: download https://www.lipidmaps.org/files/?file=LMSD&ext=sdf.zip and unzip it (structures.sdf).
 
 Each class maps (total carbons C, double bonds D) of its acyl/alkyl chains (for sphingolipids: sphingoid base
 plus N-acyl chain) to a neutral formula. Rules were checked against known species (e.g. PC 34:1 = C42H82NO8P,
@@ -31,6 +34,30 @@ CLASSES = {
 
 def mono(formula):
     return sum(MASS[e] * int(n or 1) for e, n in re.findall(r"([A-Z][a-z]?)(\d*)", formula))
+
+
+def read_sdf_fields(path):
+    """Data fields of an SDF file, one dict per structure (the structures themselves are not parsed)."""
+    recs, cur, key = [], {}, None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith("$$$$"):
+                recs.append(cur); cur, key = {}, None
+            elif line.startswith("> <"):
+                key = line[3:line.index(">", 3)]
+            elif key and line.strip():
+                cur[key] = line.strip(); key = None
+    return pd.DataFrame(recs)
+
+
+def lipidmaps_reference(sdf, classes=None):
+    """LMSD collapsed to unique sum composition + formula, restricted to `classes` (default: the classes of the
+    generated reference). Class = abbreviation without the composition, e.g. "PC O-36:2" -> "PC O-"."""
+    lm = read_sdf_fields(sdf).dropna(subset=["ABBREVIATION", "FORMULA", "EXACT_MASS"])
+    lm["class"] = lm["ABBREVIATION"].str.replace(r"\s*\d+:\d+.*$", "", regex=True)
+    lm = lm[lm["class"].isin(list(classes or CLASSES))].drop_duplicates(["ABBREVIATION", "FORMULA"])
+    return pd.DataFrame({"name": lm["ABBREVIATION"].to_numpy(), "class": lm["class"].to_numpy(),
+                         "formula": lm["FORMULA"].to_numpy(), "exact_mass": lm["EXACT_MASS"].astype(float).to_numpy()})
 
 
 def lipid_reference():

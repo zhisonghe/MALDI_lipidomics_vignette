@@ -43,3 +43,5 @@ dependencies:
       - spatialdata==0.8.0   # needs zarr >= 3 (see tutorial 2-9)
       - DeepSlice
       - linex2
+      - formulaic            # design matrices (2-6)
+      - zenodo_get           # Zenodo downloads (1-5)
