@@ -1528,16 +1528,19 @@ The same heuristic in a few lines reproduces the LBA's choice. The score subtrac
 
 ```python
 import numpy as np, pandas as pd
+# df: one row per tissue pixel, the normalized values of the features (list `features`) and a "Section" column
+# morans: features x sections, Moran's I per section (2-5)
 sec_var = df.groupby("Section")[features].var()
 score = sec_var.mean() - sec_var.var() / 2
 dropouts = (df.groupby("Section")[features].mean() < 1.5e-4).sum()
 keep = (morans.mean(axis=1) > 0.4) & (dropouts < 4) & (score > 0)
+selected = keep.index[keep]                    # the features used for the embedding (3-2)
 ```
 
-On the three zebrafish sections of 1-5, preprocessed as for the figures of section 2 (5,457 features detected in at least 5% of the tissue pixels of one section, TIC-normalized), the score behaves exactly like this: multiplying all intensities by a constant changes the fraction of features with a positive score from almost all to almost none (Figure 3-1, left). Separate criteria do not have this problem. The figures below use the 941 features with a mean Moran's I above 0.4 that are detected in at least 5% of the tissue pixels of every section (right).
+On the three zebrafish sections of 1-5, preprocessed as for the figures of section 2 (5,457 features detected in at least 5% of the tissue pixels of one section, TIC-normalized), the score behaves exactly like this: multiplying all intensities by a constant changes the fraction of features with a positive score from almost all to almost none (Figure 3-1, left). Separate criteria do not have this problem. 942 features have a mean Moran's I above 0.4 and are detected in at least 5% of the tissue pixels of every section (right). The figures below use 941 of them; one is kept out of the embedding to be restored from it in 3-4.
 
 ![Feature selection](figures/fig_3-1_features.png)
-*Figure 3-1. Left: fraction of the 5,457 zebrafish features with a positive LBA score after all intensities were multiplied by a constant; the cutoff `score > 0` selects almost all or almost none of them depending on the scale. Right: mean Moran's I against the lowest detection fraction over the three sections; the features used for the embedding (orange) pass both criteria (`scripts/make_analysis_figures.py`).*
+*Figure 3-1. Left: fraction of the 5,457 zebrafish features with a positive LBA score after all intensities were multiplied by a constant; the cutoff `score > 0` selects almost all or almost none of them depending on the scale. Right: mean Moran's I against the lowest detection fraction over the three sections; the selected features (orange) pass both criteria (`scripts/make_analysis_figures.py`).*
 
 ### 3-2 Dimensionality reduction and data integration
 <sub><a href="#top">(Back to top)</a></sub></br>
@@ -1566,6 +1569,8 @@ emb.tsne(perplexity=30, n_iter1=500, exaggeration1=1.2, n_iter2=100, exaggeratio
 emb.save_msi_dataset(plot_embeddings=True)
 ```
 
+**Which covariates to give Harmony** is a scientific decision: adjust for what you are *not* interested in. Give it the units of preparation and acquisition that carry unwanted technical variation (slide, matrix coating batch, run, day), and only if they are not aliased with what you want to study. `SectionID` is not automatically a technical batch: in serial sections it also encodes anatomy (section position), and in independent samples sections are nested in animals. `Sample` (animal) is the biological replicate; do not adjust for it just because pixels cluster by animal. `Sex` and `Condition` are biological; adjust for them only to build a deliberately condition-invariant reference, as the LBA did, and keep a second, minimally corrected embedding for everything else. Harmony encourages mixing across the given covariate; it does not remove it completely, and when the covariate is aliased with biology it can remove, keep or distort biological differences. If you adjust for `Condition`, never use the corrected embedding (or anything predicted from it) to test for condition effects.
+
 The same in generic scanpy terms (environment `msi-analysis`):
 
 ```python
@@ -1580,7 +1585,7 @@ ref = (adata.obs["Condition"] == "control").values     # learn the factors on th
 nmf = NMF(n_components=16, init="nndsvda", random_state=0, max_iter=500)
 nmf.fit(Xsel[ref])
 adata.obsm["X_nmf"] = nmf.transform(Xsel)              # project all pixels with the fixed loadings
-ho = hm.run_harmony(adata.obsm["X_nmf"], adata.obs, ["slide"])   # verified technical units only (see NOTE)
+ho = hm.run_harmony(adata.obsm["X_nmf"], adata.obs, ["slide"])   # verified technical units only (see above)
 Z = np.asarray(ho.Z_corr)
 # harmonypy <= 0.0.x returns components x cells; newer versions may return cells x components
 n_obs, n_comp = adata.obsm["X_nmf"].shape
@@ -1594,13 +1599,10 @@ else:
 
 Without a scale step like the one above, NMF mostly models the few most intense lipids, because it minimizes the squared error on the original values.
 
-In the zebrafish example, all three sections come from one embryo, so the reference set is all pixels, and Harmony is run on the section. Pixels already mix fairly well across sections: of the 15 nearest neighbours of a pixel in the NMF space, 69% come from its own section (33% would be complete mixing), and after Harmony 64% (Figure 3-2). The remaining separation is partly anatomy, because the sections cut the embryo at different depths; integration should not remove it.
+In the zebrafish example, all three sections come from one embryo, so the reference set is all pixels, and Harmony is run on the section. Pixels already mix partly across sections: of the 15 nearest neighbours of a pixel in the NMF space, 69% come from its own section (34% would be expected with complete mixing, given the pixel numbers of the sections), and after Harmony 64% (Figure 3-2). The remaining separation is partly anatomy, because the sections cut the embryo at different depths; integration should not remove it.
 
 ![NMF and Harmony](figures/fig_3-2_embedding.png)
-*Figure 3-2. UMAP of the NMF scores of all tissue pixels of the three zebrafish sections, before (left) and after (centre left) Harmony on the section, and three NMF factors in section 22 with the lipid that loads most on each (right) (`scripts/make_analysis_figures.py`).*
-
->**NOTE**
->Which covariates to give Harmony is a scientific decision: regress out what you are *not* interested in. Give it the units of preparation and acquisition that carry unwanted technical variation (slide, matrix coating batch, run, day), and only if they are not aliased with what you want to study. `SectionID` is not automatically a technical batch: in serial sections it also encodes anatomy (section position), and in independent samples sections are nested in animals. `Sample` (animal) is the biological replicate; do not remove it just because pixels cluster by animal. `Sex` and `Condition` are biological; remove them only to build a deliberately condition-invariant reference, as the LBA did, and keep a second, minimally corrected embedding for everything else. If you remove `Condition`, never use the corrected embedding (or anything predicted from it) to test for condition effects.
+*Figure 3-2. UMAP of the NMF scores of all tissue pixels of the three zebrafish sections, before (left) and after (centre left) Harmony on the section (column `sample`), and three NMF factors in section 22 with the lipid that loads most on each (right) (`scripts/make_analysis_figures.py`).*
 
 ### 3-3 Clustering and spatial segmentation
 <sub><a href="#top">(Back to top)</a></sub></br>
@@ -1613,7 +1615,7 @@ sc.tl.leiden(adata, resolution=2.0, flavor="igraph", n_iterations=2, key_added="
 ```
 With millions of pixels, subsample for the neighbor graph and transfer labels with a classifier, or use `n_neighbors` ~15 and a GPU implementation (rapids-singlecell). Validate such classifiers on entire held-out animals (and, if possible, acquisition runs), never on randomly held-out pixels: neighbouring pixels are nearly identical, so random splits overestimate accuracy. Report accuracy per held-out animal and per cluster.
 
-The resolution of 2.0 above was chosen for millions of pixels; for the three zebrafish sections (57,000 pixels), resolution 0.5 gives 14 clusters. They follow the anatomy of the embryo and recur in all three sections (Figure 3-3). Two clusters (0 and 8) form the outer rim of the tissue, and their marker ions (Figure 3-5) are background ions: in section 24, m/z 402.17 is about 8 times and m/z 885.04 about 4 times more intense off tissue than inside the embryo, while PC 34:1 [M+H]+ reaches only 8% of its inner level in these rim pixels. This is the rim of delocalized signal discussed in 2-2. Inspect such clusters, and remove them or tighten the mask, before interpreting them as tissue.
+The resolution of 2.0 above is the LBA-scale setting; the number of clusters it gives depends on the data, the neighbour graph and the preprocessing, not only on the number of pixels. For the three zebrafish sections (57,000 pixels), resolution 0.5 gives 14 clusters. Whatever resolution you choose, check that the clusters are stable under small changes, spatially coherent, recur in independent samples and can be interpreted. They follow the anatomy of the embryo and recur in all three sections (Figure 3-3). Two clusters (0 and 8) form the outer rim of the tissue, and their marker ions (Figure 3-5) are background ions: in section 24, m/z 402.17 is about 8 times and m/z 885.04 about 4 times more intense off tissue than inside the embryo, while PC 34:1 [M+H]+ reaches only 8% of its inner level in these rim pixels. This is the rim of delocalized signal discussed in 2-2. Inspect such clusters, and remove them or tighten the mask, before interpreting them as tissue.
 
 ![Leiden clusters](figures/fig_3-3_clusters.png)
 *Figure 3-3. Leiden clusters (resolution 0.5) on the Harmony-corrected NMF embedding, in the three zebrafish sections (`scripts/make_analysis_figures.py`).*
@@ -1695,14 +1697,14 @@ restored = model.predict(adata.obsm["X_harmony"])           # keep in a separate
 print("held-out r:", np.corrcoef(restored[~train], y[~train])[0, 1])
 ```
 
-Figure 3-4 does this for a well-detected zebrafish lipid that was left out of the embedding. Trained on sections 22 and 24, the restored image of section 26 correlates well with the measured one (r = 0.85), which is what the LBA's validation criterion checks. But the restored image is smoother, and more of its variance is explained by the clusters (31%, against 23% for the measured values): the prediction carries the structure of the embedding, which is the circularity described below.
+Figure 3-4 does this for a well-detected zebrafish lipid that was left out of the embedding. Trained on sections 22 and 24, the restored image of section 26 correlates well with the measured one (r = 0.85), which is what the LBA's validation criterion checks. But the restored image is smoother, and more of its variance is explained by the clusters (31%, against 23% for the measured values): the prediction carries the structure of the embedding, which is the circularity described below. Note also that NMF and Harmony were fitted on all three sections, including the held-out one, so r checks the regressor, not a fully independent prediction; for that, fit the whole chain (feature selection, scaling, NMF, integration, regressor) without the held-out sample.
 
 ![Restoration from the embedding](figures/fig_3-4_restoration.png)
 *Figure 3-4. Restoration of m/z 1017.6684 in the held-out zebrafish section 26 from the Harmony-corrected NMF embedding (gradient-boosted trees trained on sections 22 and 24): measured values, restored values, and the Leiden clusters of Figure 3-3 (`scripts/make_analysis_figures.py`).*
 
 Why this needs care:
-1. **Circularity.** A restored lipid is a function of the same embedding that defined the clusters. It will look cluster-specific by construction, and cannot provide independent evidence for a cluster.
-2. **Removed biology.** The predictors come from an embedding where `Condition` (and `Sex`) were regressed out. A restored lipid can then only show condition differences indirectly, through changed cluster composition.
+1. **Circularity.** A restored lipid is a function of the same embedding that defined the clusters. It tends to inherit the structure of that embedding, looks more cluster-specific than the measured lipid, and cannot provide independent evidence for a cluster.
+2. **Weakened biology.** The predictors come from an embedding that was adjusted for `Condition` (and `Sex`). Harmony does not remove such differences completely, but it can weaken or distort them, so condition differences of a restored lipid are unreliable in either direction.
 3. **Validation on the training distribution.** A validation r > 0.4 on one held-out section of the same brain says little about sections from other animals or conditions.
 
 Recommendations:
@@ -1718,13 +1720,27 @@ A cluster is only a label. To make it useful, describe what distinguishes it (ma
 **Marker lipids.** Mann-Whitney U tests of each cluster versus all others (or versus siblings in a hierarchy), with BH correction, on 0-1 scaled measured values; report the effect size (log2 fold change of means) and the fraction of pixels above background. Pixels are spatially autocorrelated and nested in sections and animals, so these p-values are not valid inference, and BH correction does not fix that. Use them, or better the effect sizes, only to rank candidate markers. To claim that a lipid is enriched in a cluster, aggregate per animal x cluster and test with the animal as unit, as in 3-6.
 
 ```python
-# rank on measured (not imputed or batch-corrected) values, stored in a dedicated layer (2-9)
+import numpy as np, pandas as pd
+# measured (not imputed or batch-corrected) values (2-9), scaled 0-1 per lipid between its 0.5 and 99.5 percentiles
+M = adata.X.toarray() if hasattr(adata.X, "toarray") else np.asarray(adata.X)
+lo, hi = np.percentile(M, 0.5, axis=0), np.percentile(M, 99.5, axis=0)
+adata.layers["measured_scaled"] = np.clip((M - lo) / np.where(hi > lo, hi - lo, 1), 0, 1)
+adata.obs["lipizone"] = adata.obs["leiden"]                  # or the EUCLID lipizones (3-3)
+
 sc.tl.rank_genes_groups(adata, groupby="lipizone", method="wilcoxon", layer="measured_scaled", use_raw=False)
-sc.pl.rank_genes_groups_dotplot(adata, n_genes=3, layer="measured_scaled")   # plot the same values
+dp = sc.pl.rank_genes_groups_dotplot(adata, n_genes=2, layer="measured_scaled", return_fig=True)   # same values
+dp.legend(colorbar_title="mean scaled value", size_title="pixels with signal (%)")   # scanpy's defaults say "cells"
+dp.show()
+
+# effect size on the unscaled measured values: log2 ratio of the cluster mean to the mean of all other pixels
+lab = adata.obs["lipizone"].to_numpy()
+eps = np.median(M[M > 0]) * 1e-3                              # small offset for lipids absent from a group
+lfc = pd.DataFrame({c: np.log2((M[lab == c].mean(axis=0) + eps) / (M[lab != c].mean(axis=0) + eps))
+                    for c in np.unique(lab)}, index=adata.var_names)        # lipids x clusters
 ```
 
 ![Marker lipids](figures/fig_3-5_markers.png)
-*Figure 3-5. The two top-ranked features of each zebrafish cluster of Figure 3-3 (Wilcoxon test of each cluster against all others on 0-1 scaled measured values; colour: mean scaled value, scaled per feature; dot size: fraction of pixels with signal). The ranking is computed on pixels and serves to find candidates, not to test them (`scripts/make_analysis_figures.py`).*
+*Figure 3-5. The two top-ranked features of each zebrafish cluster of Figure 3-3 (Wilcoxon test of each cluster against all others on 0-1 scaled measured values; colour: mean scaled value, rescaled per feature for display, not a fold change; dot size: fraction of pixels with signal). The ranking is computed on pixels and serves to find candidates, not to test them (`scripts/make_analysis_figures.py`).*
 
 **Anatomy.** Cross-tabulate clusters and Allen regions; the LBA used a reciprocal enrichment score (enrichment of the cluster in the region multiplied by enrichment of the region in the cluster) to name clusters after regions.
 
@@ -1750,7 +1766,7 @@ Remember that the MSI and MERFISH data come from different animals and that a pi
 ### 3-6 Comparing conditions
 <sub><a href="#top">(Back to top)</a></sub></br>
 Comparing conditions, e.g. disease vs control, is where MSI analyses often go wrong. The rules are the same as for any replicated experiment:
-1. **The biological replicate is the animal**, not the pixel and not the section. Millions of pixels make any difference "significant".
+1. **The replicate is the independent biological unit** that was assigned to a condition (an animal, a donor, an independently generated organoid batch), not the pixel and not the section. Millions of pixels make any difference "significant". The code below calls this unit `Sample` and speaks of animals.
 2. **Acquisition batches must not coincide with conditions.** If they do (as in the LBA pregnancy experiment, all acquired two years after the controls), no model can separate the two; a model can only replace the missing information with an assumption.
 3. **Normalization and integration must not remove the effect of interest** (2-6, 3-2, 3-4).
 4. **Test measured, not imputed, values.**
@@ -1764,6 +1780,7 @@ import statsmodels.formula.api as smf
 from statsmodels.stats.multitest import multipletests
 
 # df: one row per pixel, measured (not imputed) lipid values plus metadata columns
+# (if there is no Sex column, drop "Sex" from the grouping keys here and below)
 pb = (df.groupby(["Sample", "Condition", "Sex", "lipizone"], observed=True)[lipids]
         .mean().reset_index())                                     # one row per animal x lipizone
 pb["Condition"] = pd.Categorical(pb["Condition"], categories=["control", "treated"])  # reference first
@@ -1778,8 +1795,9 @@ for lz, d in pb.groupby("lipizone"):
         d2 = d.assign(y=np.log2(d[lip] + pc)).replace([np.inf, -np.inf], np.nan).dropna(subset=["y"])
         if (d2.groupby("Condition", observed=False)["Sample"].nunique() < 3).any():
             continue                                             # too few animals left for this lipid
-        # include covariates such as Sex only if the design supports them (both levels in both groups)
-        mod = smf.ols("y ~ Condition + Sex", data=d2)
+        # add covariates such as Sex only if the design supports them (both levels in both groups)
+        with_sex = "Sex" in d2 and (d2.groupby("Condition", observed=False)["Sex"].nunique() > 1).all()
+        mod = smf.ols("y ~ Condition + Sex" if with_sex else "y ~ Condition", data=d2)
         if np.linalg.matrix_rank(mod.exog) < mod.exog.shape[1]:
             continue                                             # e.g. sex confounded with condition here
         fit = mod.fit()
@@ -1798,7 +1816,9 @@ sec = (df.groupby(["Sample", "SectionID", "Condition", "Sex", "lipizone"], obser
          .mean().reset_index())                                    # one row per section x lipizone
 sec["Condition"] = pd.Categorical(sec["Condition"], categories=["control", "treated"])
 d3 = sec[sec["lipizone"] == "LZ1"].assign(y=lambda d: np.log2(d["PC 34:1"] + pc))
-fit = smf.mixedlm("y ~ Condition + Sex", data=d3, groups=d3["Sample"]).fit(reml=False)   # ML for fixed effects
+with_sex = (d3.groupby("Condition", observed=False)["Sex"].nunique() > 1).all()
+fit = smf.mixedlm("y ~ Condition + Sex" if with_sex else "y ~ Condition", data=d3,
+                  groups=d3["Sample"]).fit(reml=False)                     # ML for fixed effects
 print(fit.converged, fit.params[term], fit.pvalues[term])
 ```
 Wald p-values of mixed models with few animals are anti-conservative; use a likelihood-ratio test or parametric bootstrap, or average the sections per animal first and use the OLS model above, which is then the more robust choice.
@@ -1813,11 +1833,12 @@ def fit_effect(d, y, binomial_weights=None):
     d = d.assign(y=y).dropna(subset=["y"])
     if d["y"].nunique() < 2 or (d.groupby("Condition", observed=False)["Sample"].nunique() < 3).any():
         return [np.nan] * 4                               # constant (e.g. detected everywhere) or too few animals
+    with_sex = "Sex" in d and (d.groupby("Condition", observed=False)["Sex"].nunique() > 1).all()
+    formula = "y ~ Condition + Sex" if with_sex else "y ~ Condition"
     if binomial_weights is None:
-        mod = smf.ols("y ~ Condition + Sex", data=d)
+        mod = smf.ols(formula, data=d)
     else:
-        mod = smf.glm("y ~ Condition + Sex", data=d, family=sm.families.Binomial(),
-                      var_weights=d[binomial_weights])
+        mod = smf.glm(formula, data=d, family=sm.families.Binomial(), var_weights=d[binomial_weights])
     if np.linalg.matrix_rank(mod.exog) < mod.exog.shape[1]:
         return [np.nan] * 4
     fit = mod.fit() if binomial_weights is None else mod.fit(scale="X2")   # X2: quasi-binomial
@@ -1845,7 +1866,7 @@ two = pd.DataFrame(rows, columns=["lipizone", "lipid", "part", "effect", "ci_low
 ok = two["p"].notna()
 two.loc[ok, "padj"] = two[ok].groupby("part")["p"].transform(lambda p: multipletests(p, method="fdr_bh")[1])
 ```
-The 20-pixel minimum applies per animal and region. Results that differ between the uncensored and the censored data depend on run-to-run sensitivity and should be reported as such.
+The 20-pixel minimum applies per animal and region. Results that differ between the uncensored and the censored data are sensitive to acquisition-specific detection limits and to the censoring assumptions; report them as such, because they cannot be interpreted cleanly without replicated acquisitions or reference material.
 
 **Cardinal** implements the same idea on MSI objects, and a segmentation-based version that first finds the relevant region per sample:
 
@@ -1888,7 +1909,7 @@ For interactive exploration, [napari](https://napari.org) handles large 3D array
 * **Same-section multimodal data.** Spatial multimodal analysis (SMA; Vicari et al. 2024) acquires MALDI-MSI and Visium spatial transcriptomics on the same section. Clarke et al. 2025 image metabolites, lipids and N-glycans sequentially on one section. These avoid the cross-animal integration problem entirely.
 * **Single-cell MSI.** SpaceM (Rappez et al. 2021) combines microscopy with MALDI on cultured cells; MEISTER (Xie et al. 2024) profiled >13,000 dissociated brain cells by MALDI and mapped their signatures onto tissue.
 * **Faster acquisition.** MEISTER's deep-learning reconstruction from short transients accelerated FT-ICR acquisition 15-fold.
-* **Sensitivity, separation and structure.** These are three different things. MALDI-2 (laser post-ionization) increases ion yield for many lipid classes and changes coverage and adduct patterns, so ion identities and intensity responses must be re-established rather than carried over from conventional MALDI. Ion mobility (e.g. trapped ion mobility on timsTOF) adds a gas-phase separation dimension and collision cross sections, which separate some isobars and isomers and support, but rarely establish, identities. On-tissue MS/MS provides structural evidence (class, chains), at the level its fragments support.
+* **Other data types.** Data with an ion mobility dimension (features defined by m/z and collision cross section), MALDI-2 data (other coverage and adduct patterns) and on-tissue MS/MS need adapted peak calling, matching and annotation. The steps of this tutorial assume MS1 images of one polarity.
 
 ## Appendix A. The Lipid Brain Atlas pipeline as it was actually run
 <sub><a href="#top">(Back to top)</a></sub></br>

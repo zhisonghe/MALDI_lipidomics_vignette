@@ -179,9 +179,10 @@ def run(adata, out, batch="sample", name=None, resolution=1.0, n_components=16, 
     B = adata.copy(); B.var_names = pd.Index(name.astype(str)).where(~pd.Index(name.astype(str)).duplicated(),
                                                                      pd.Index(name.astype(str)) + "_" + pd.Index(adata.var_names))
     sc.tl.rank_genes_groups(B, groupby="leiden", method="wilcoxon", layer="measured_scaled", use_raw=False)
-    dp = sc.pl.rank_genes_groups_dotplot(B, n_genes=2, layer="measured_scaled", show=False,
+    dp = sc.pl.rank_genes_groups_dotplot(B, n_genes=2, layer="measured_scaled", return_fig=True,
                                         standard_scale="var", figsize=(max(8, 0.32 * 2 * ncl + 3), 0.32 * ncl + 2))
-    plt.savefig(f"{out}/fig_3-5_markers.png"); plt.close("all")
+    dp.legend(colorbar_title="mean scaled value\n(per feature)", size_title="pixels with\nsignal (%)")
+    dp.savefig(f"{out}/fig_3-5_markers.png"); plt.close("all")
 
     # ---- 3-6 (only with a censored copy): detection and intensity per sample and cluster, uncensored vs censored
     if censored is not None and condition is not None:
