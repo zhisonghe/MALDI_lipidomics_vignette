@@ -385,10 +385,10 @@ Every later step treats the acquisitions as comparable measurements of tissue. P
 
 **Choosing reference ions.** A reference ion must have no other ion within a few ppm, otherwise the measured "error" is the distance to the other ion. In positive mode this is a real risk, because sodium adducts fall close to protonated ions of other lipids: "PC 38:6 [M+H]+" (m/z 806.5694) and PC 36:3 [M+Na]+ (m/z 806.5670) are only 3.0 ppm apart, as are "PE 38:4 [M+H]+" (768.5538) and PE 36:1 [M+Na]+ (768.5514). If some reference ions sit at -3 ppm while all others are within 0.5 ppm, you are probably looking at the sodium adduct. Use ions without such near-isobars, spread over the m/z range, and set a minimal intensity so that noise centroids near the reference m/z are not counted as matches.
 
-**Making the tissue mask.** The mask is a threshold on an image in which tissue is brighter than the background; Otsu's method chooses the threshold that best separates the two groups of pixel values. Which image is thresholded matters more than the method. The TIC seems the obvious choice, but it includes the matrix ions, which can be as strong off tissue as on it. Otsu on the TIC then follows matrix patches and misses parts of the tissue (Figure 2-2a, bottom left). An image of signal that comes from the tissue avoids this: the summed intensity in an m/z range dominated by membrane lipids (e.g. m/z 700-850 in positive mode), or the image of one abundant tissue lipid. Light smoothing (a Gaussian with a sigma of one pixel) removes pixel-to-pixel noise before the threshold is applied (Figure 2-2a, bottom right). After thresholding, remove small isolated pieces (noise, matrix crystals) and fill only small holes. Do not fill all holes or keep only the largest piece: many tissues contain cavities without tissue (ventricles, vessels, lumens of glands or organoids), which must stay outside the mask, and one raster can contain several samples or detached tissue pieces. No rule works for every tissue, so always look at the mask next to the TIC and ion images, and correct it by hand where needed (e.g. by drawing in napari).
+**Making the tissue mask.** The mask is a threshold on an image in which tissue is brighter than the background; Otsu's method chooses the threshold that best separates the two groups of pixel values. Which image is thresholded matters more than the method. The TIC seems the obvious choice, but it includes the matrix ions, which can be as strong off tissue as on it. Otsu on the TIC then follows matrix patches and misses parts of the tissue (Figure 2-2a, third column). A broad m/z range dominated by membrane lipids (e.g. m/z 700-850 in positive mode) is not safe either: it still contains matrix clusters and other background ions, and in two of the three zebrafish sections its mask also fails (fourth column). What works is the summed image of a few known, abundant tissue ions, for example the reference ions of the mass check, each taken within a few ppm of its exact m/z (fifth column). These ions come from the tissue, and summing several of them makes the image less noisy than any single one. Light smoothing (a Gaussian with a sigma of one pixel) removes the remaining pixel-to-pixel noise before the threshold is applied. The ion image has its own weakness: abundant ions can spread into the matrix around the tissue during matrix application, and the mask then takes in a rim of this delocalized signal. On data with a weak matrix background, the TIC or m/z-range mask can therefore be the tighter one. Make two or three masks and compare them before choosing. After thresholding, remove small isolated pieces (noise, matrix crystals) and fill only small holes. Do not fill all holes or keep only the largest piece: many tissues contain cavities without tissue (ventricles, vessels, lumens of glands or organoids), which must stay outside the mask, and one raster can contain several samples or detached tissue pieces. No rule works for every tissue, so always look at the mask next to the TIC and ion images, and correct it by hand where needed (e.g. by drawing in napari).
 
-![Tissue masks of a zebrafish section](figures/fig_2-2_qc_mask.png)
-*Figure 2-2a. Zebrafish section 22 of 1-5 (7 µm raster). Otsu on the full-spectrum TIC (bottom left) follows matrix signal off the tissue and misses parts of the embryo; Otsu on the lightly smoothed summed intensity of m/z 700-850 (bottom right) gives a usable mask, which the other figures use (`scripts/make_figures.py`).*
+![Tissue masks of the zebrafish sections](figures/fig_2-2_qc_mask.png)
+*Figure 2-2a. The three zebrafish sections of 1-5 (7 µm raster), one per row: log TIC, log summed intensity of five reference ions (PC 34:1 [M+H]+, [M+Na]+, [M+K]+, PC 32:0 [M+H]+, PC 36:1 [M+H]+, each within 5 ppm), and the masks from Otsu on the log TIC, on the smoothed summed intensity of m/z 700-850, and on the smoothed reference-ion image. The TIC mask follows matrix signal off the tissue in all sections; the m/z-range mask works for section 22 but takes in background and loses the yolk in sections 24 and 26; the reference-ion mask follows the embryo in all three and is used in the other figures (`scripts/make_figures.py`).*
 
 A minimal QC script with pyimzML that does all three (environment `msi-analysis`):
 
@@ -402,20 +402,25 @@ name = "20220411_MouseBrain_female_217G_349x316_Att30_25um"
 p = ImzMLParser(f"imzml/{name}.imzML")
 pixel_um = 25                                           # raster step in µm (imzML header: "pixel size x")
 z = p.coordinates[0][2]                                 # imaging plane, passed to getionimage below
-lipid_range = (700, 850)                                # m/z range dominated by membrane lipids (positive mode)
+# reference ions: abundant tissue lipids without near-isobars (positive mode, DHB)
+refs = {"PC 34:1 +H": 760.5851, "PC 34:1 +Na": 782.5670, "PC 34:1 +K": 798.5410,
+        "PC 32:0 +H": 734.5694, "PC 36:1 +H": 788.6164}
+ref_mz = np.array(list(refs.values()))
 
-# 1) TIC image, and the summed intensity in the lipid range for the mask
+# 1) TIC image, and the summed intensity of the reference ions (nearest centroid within 5 ppm) for the mask
 xs = np.array([c[0] for c in p.coordinates]) - 1
 ys = np.array([c[1] for c in p.coordinates]) - 1
 tic = np.zeros((ys.max() + 1, xs.max() + 1))
-lip = np.zeros_like(tic)
+ion = np.zeros_like(tic)
 for i, (x, y) in enumerate(zip(xs, ys)):
     mzs, ints = p.getspectrum(i)
     tic[y, x] = ints.sum()
-    lip[y, x] = ints[(mzs >= lipid_range[0]) & (mzs <= lipid_range[1])].sum()
+    if len(mzs) > 1:
+        j = np.clip(np.searchsorted(mzs, ref_mz), 1, len(mzs) - 1)
+        k = np.where(np.abs(mzs[j - 1] - ref_mz) < np.abs(mzs[j] - ref_mz), j - 1, j)   # nearest centroid
+        ion[y, x] = ints[k[np.abs(mzs[k] - ref_mz) / ref_mz <= 5e-6]].sum()
 
-# 2) mass accuracy on reference ions (positive mode, DHB): PC 34:1 [M+H]+, [M+Na]+, [M+K]+
-refs = {"PC 34:1 +H": 760.5851, "PC 34:1 +Na": 782.5670, "PC 34:1 +K": 798.5410}
+# 2) mass accuracy on the reference ions
 min_int = 0          # set a minimal intensity (or S/N) so that noise centroids are not taken as matches
 for lab, mz in refs.items():
     errs = []
@@ -433,8 +438,8 @@ for lab, mz in refs.items():
     else:
         print(f"{lab}: not detected")
 
-# 3) tissue mask: Otsu threshold on the smoothed log lipid-range signal, remove small pieces, fill only pinholes
-sig = np.log1p(ndi.gaussian_filter(lip, 1))
+# 3) tissue mask: Otsu threshold on the smoothed log reference-ion image, remove small pieces, fill only pinholes
+sig = np.log1p(ndi.gaussian_filter(ion, 1))
 if np.count_nonzero(sig > 0) < 100:
     raise ValueError(f"{name}: (almost) no signal, check the acquisition")
 mask = sig > threshold_otsu(sig[sig > 0])
@@ -453,13 +458,13 @@ np.save(f"data/{name}/mask.npy", mask)
 
 fig, ax = plt.subplots(1, 4, figsize=(16, 4))
 ax[0].imshow(np.log1p(tic)); ax[0].set_title("log TIC")
-ax[1].imshow(np.log1p(lip)); ax[1].set_title(f"log summed m/z {lipid_range[0]}-{lipid_range[1]}")
+ax[1].imshow(np.log1p(ion)); ax[1].set_title("log summed reference ions")
 ax[2].imshow(getionimage(p, 798.5410, tol=798.5410 * 5e-6, z=z)); ax[2].set_title("m/z 798.541")
 ax[3].imshow(mask); ax[3].set_title("tissue mask")
 plt.savefig(f"qc_{name}.png", dpi=150)
 ```
 
-The size limits are in mm², converted to pixels with the raster step, so that they mean the same at different pixel sizes. Adapt them to your samples, and the m/z range to your polarity, matrix and tissue (it should contain abundant tissue ions and few matrix ions).
+The size limits are in mm², converted to pixels with the raster step, so that they mean the same at different pixel sizes. Adapt them to your samples, and the reference ions to your polarity, matrix and tissue: they should be abundant in the tissue and absent from the matrix (in negative mode, e.g. abundant PE, PI or sulfatide [M-H]- ions).
 
 >**NOTE**
 >* Check whether the mask touches the border of the raster (printed above). If it does, the acquisition did not cover the whole sample, which matters for anything computed per sample (sample means, detection fractions, region proportions).
@@ -471,7 +476,7 @@ The size limits are in mm², converted to pixels with the raster step, so that t
 **Mass calibration.** Whether to recalibrate depends on the observed errors relative to the tolerance you will use for matching and annotation, not on the analyzer type: recalibrate when the systematic error or its drift over m/z, position or acquisition time uses up a material part of that tolerance (a reproducible 1-2 ppm offset matters for sub-ppm annotation). Plot the error of several unambiguous reference ions spanning the mass range against m/z, position and acquisition time (Figure 2-2b); then correct with a constant, linear (in m/z) or position/time-dependent model as the residuals require (Cardinal `recalibrate()`, lock-mass correction during acquisition, or a regression on reference ions), and check the residuals on ions not used for fitting. Do not recalibrate on database matches selected from the same data.
 
 ![Mass error of reference ions](figures/fig_2-2_calibration.png)
-*Figure 2-2b. Median mass error of nine reference ions (PC adducts and the PC 34:1 in-source fragment) in the tissue pixels of the three zebrafish sections, against m/z (left) and acquisition order (right). All sections are offset by about -0.5 to -1 ppm without a consistent drift over the acquisition. The highest ion, PC 36:1 [M+Na]+, deviates upward in all three sections, which points to an unresolved neighbouring ion rather than to calibration (`scripts/make_figures.py`).*
+*Figure 2-2b. Median mass error of the reference ions (PC adducts and the PC 34:1 in-source fragment; eight of the nine were detected above 500 counts) in the tissue pixels of the three zebrafish sections, against m/z (left) and acquisition order (right). All sections are offset by about -0.6 to -0.9 ppm. Section 24 drifts by about -0.5 ppm over the acquisition, the other two have no consistent trend. The highest ion, PC 36:1 [M+Na]+, deviates upward in all three sections, which points to an unresolved neighbouring ion rather than to calibration (`scripts/make_figures.py`).*
 
 ### 2-3 Peak calling (image extraction)
 <sub><a href="#top">(Back to top)</a></sub></br>
@@ -712,7 +717,7 @@ def consensus_intervals(matches, acquisitions, pad_ppm=1.0):
     return iv
 
 
-def requantify(imzml, intervals, window_da=25.0, q=0.05):
+def requantify(imzml, intervals, window_da=25.0, q=0.05, ibd=None):
     """Raw summed intensity of every interval in every pixel of one acquisition (sparse AnnData).
 
     obs['tic_spectrum']: total intensity of each spectrum (for full-spectrum TIC normalization).
@@ -720,6 +725,7 @@ def requantify(imzml, intervals, window_da=25.0, q=0.05):
     intensities (raw counts). This describes how low the retained centroids go in that part of the
     spectrum; it is a diagnostic, not a limit of detection. var['window'] maps features to windows.
     The windows are defined from the feature centres, so they are identical for all acquisitions.
+    ibd: path of the binary file if it is not next to the imzML with the same name.
     """
     if intervals.empty:
         raise ValueError("no intervals for this acquisition")
@@ -730,7 +736,7 @@ def requantify(imzml, intervals, window_da=25.0, q=0.05):
     lo, hi = iv["min"].values, iv["max"].values
     mz0 = np.floor(iv["mz"].min() / window_da) * window_da
     nwin = int((iv["mz"].max() - mz0) // window_da) + 1
-    p = ImzMLParser(imzml)
+    p = ImzMLParser(imzml, ibd_file=open(ibd, "rb")) if ibd else ImzMLParser(imzml)
     n = len(p.coordinates)
     low = np.full((n, nwin), np.nan, dtype=np.float32)
     tic = np.zeros(n)
@@ -784,10 +790,10 @@ The result contains raw (not TIC-divided) intensities, which feed the pixel-leve
 
 Requantification cannot recover signal that the instrument did not centroid: values below the centroiding threshold remain zero (see 2-6). A requantified value where the feature was not called is signal in the expected window, not a confirmed peak; inspect a few such images and spectra, especially where intervals of neighbouring features were cut.
 
-As an illustration with the three zebrafish sections of 1-5 (simple frequency-based peak calling keeping features found in >= 5% of the tissue pixels, then ppm matching at 3 ppm): 4,870 of the 7,572 matched features were called in some but not all sections, leaving 7,868 acquisition x feature gaps. After requantification, 83% of these gaps had signal in at least 1% of the pixels (most in 1-5%): they were low-frequency signals below the calling threshold, not absences (Figure 2-4).
+As an illustration with the three zebrafish sections of 1-5 (simple frequency-based peak calling keeping features found in >= 5% of the tissue pixels, then ppm matching at 3 ppm): 2,892 of the 5,493 matched features were called in some but not all sections, leaving 4,691 acquisition x feature gaps. After requantification, 84% of these gaps had signal in at least 1% of the pixels (82% in 1-5%): they were low-frequency signals below the calling threshold, not absences (Figure 2-4).
 
 ![Detection of gap-filled features](figures/fig_2-4_gapfill.png)
-*Figure 2-4. Fraction of tissue pixels with signal after requantification, for the 7,868 acquisition x feature gaps of the zebrafish example. Most gaps have signal in 1-5% of the pixels, just below the 5% calling threshold (`scripts/make_figures.py`).*
+*Figure 2-4. Fraction of tissue pixels with signal after requantification, for the 4,691 acquisition x feature gaps of the zebrafish example. Most gaps have signal in 1-5% of the pixels, just below the 5% calling threshold (`scripts/make_figures.py`).*
 
 ### 2-5 Feature quality control
 <sub><a href="#top">(Back to top)</a></sub></br>
@@ -932,7 +938,7 @@ X_pqn = X / f_pqn[:, None]                         # pixels with too few quotien
 TIC, RMS and PQN make values relative to the other measured lipids in the same pixel. A strong local increase of one abundant lipid then lowers the apparent values of all others in those pixels; check suspicious anticorrelations against unnormalized images. Pixel-level normalization does not correct differences between samples, slides or runs that affect lipids differently, which is what the cross-sample methods below are for.
 
 #### Pixel level: censoring differences between acquisitions (sensitivity analysis)
-In centroided data, a zero means "no centroid was retained", not "absent". The instrument drops peaks below a noise-dependent threshold that varies with m/z, between pixels and between acquisitions, and the data do not tell us that threshold directly. A usable diagnostic is how low the *retained* centroids go: `requantify()` (2-4) stores, per pixel and 25-Da m/z window, the 5th percentile of the centroid intensities (`obsm["low_centroid"]`). This is not a limit of detection: it also depends on how many peaks a spectrum contains, on local chemical noise and on the vendor's centroiding. But it shows whether acquisitions differ in how low they report. Compare it on the scale on which samples are compared: TIC normalization multiplies all values of a low-signal acquisition by a larger factor, so its lowest reported values also move up relative to the other acquisitions. In the zebrafish sections of 2-4, the raw low-centroid intensities were 85-97 counts and highest in section 24, but section 24 also had about 1.6-1.8 times the total ion count of the other two, so on the TIC scale its value was the lowest (69, against 94 and 109 in sections 22 and 26; medians over pixels and windows; Figure 2-6). Zeros in sections 22 and 26 therefore hide values that section 24 would have recorded. This biases detection fractions, means that include zeros, and comparisons of sparse lipids.
+In centroided data, a zero means "no centroid was retained", not "absent". The instrument drops peaks below a noise-dependent threshold that varies with m/z, between pixels and between acquisitions, and the data do not tell us that threshold directly. A usable diagnostic is how low the *retained* centroids go: `requantify()` (2-4) stores, per pixel and 25-Da m/z window, the 5th percentile of the centroid intensities (`obsm["low_centroid"]`). This is not a limit of detection: it also depends on how many peaks a spectrum contains, on local chemical noise and on the vendor's centroiding. But it shows whether acquisitions differ in how low they report. Compare it on the scale on which samples are compared: TIC normalization multiplies all values of a low-signal acquisition by a larger factor, so its lowest reported values also move up relative to the other acquisitions. In the zebrafish sections of 2-4, the raw low-centroid intensities were 78-92 counts and highest in section 24, but section 24 also had about 1.3 and 2.1 times the total ion count of sections 22 and 26, so on the TIC scale its value was the lowest (70, against 84 and 123 in sections 22 and 26; medians over pixels and windows; Figure 2-6). Zeros in sections 22 and 26 therefore hide values that section 24 would have recorded. This biases detection fractions, means that include zeros, and comparisons of sparse lipids.
 
 ![Low-centroid diagnostic](figures/fig_2-6_censoring.png)
 *Figure 2-6. Median 5th-percentile centroid intensity per 25-Da m/z window in the tissue pixels of the three zebrafish sections, in raw counts (left) and after TIC normalization (right). The order of the sections reverses: section 24 reports the highest values in raw counts but the lowest on the TIC scale (`scripts/make_figures.py`).*
@@ -952,7 +958,7 @@ X_cens = np.where(X >= thr[None, :], X, 0)                        # censored cop
 print("nonzero values kept:", round((X_cens > 0).sum() / (X > 0).sum(), 3))
 ```
 
-The censored copy deliberately discards low values in the more sensitive acquisitions (in the zebrafish example, 68% of the nonzero values remained), so use it to check conclusions, not as the primary data. Varying the quantile or the window width shows how strongly a result depends on these choices. When the acquisitions differ several-fold, re-acquiring under matched conditions is better than any correction.
+The censored copy deliberately discards low values in the more sensitive acquisitions (in the zebrafish example, 57% of the nonzero values remained), so use it to check conclusions, not as the primary data. Varying the quantile or the window width shows how strongly a result depends on these choices. When the acquisitions differ several-fold, re-acquiring under matched conditions is better than any correction.
 
 **Order of operations.** Feature QC, pixel normalization and censoring depend on each other. A workable order: (1) a permissive recurrence filter on the requantified raw data (2-5); (2) provisional pixel normalization on the retained features; (3) the censoring diagnostic above; (4) the final recurrence, tissue-enrichment and spatial filters, computed on the data you will analyse (and, for the sensitivity analysis, also on the censored copy); (5) pixel normalization recomputed on this frozen feature set; (6) all thresholds fixed before any comparison between conditions.
 
@@ -1406,7 +1412,7 @@ ax[1].set_xlabel("tolerance (ppm)"); ax[1].legend()
 The median of all candidate errors is only a rough estimate of the systematic offset; use the median error of your reference ions from 2-2 if you have it. For a rough empirical check of chance matches at a given tolerance, repeat the matching with adducts that should not occur in your samples (e.g. +Ag, +Cs; make sure they are really absent from your preparation) and count how many peaks they annotate. This is a diagnostic, not an FDR estimate; METASPACE's target-decoy FDR is built into its scoring and is the formal option.
 
 ![Annotation tolerance diagnostics](figures/fig_2-8_tolerance.png)
-*Figure 2-8. Annotation diagnostics for all 7,572 matched zebrafish features (before feature QC), against a generated sum-composition reference (`scripts/lipid_reference.py`; [M+H]+, [M+Na]+, [M+K]+). Left: errors of all candidates within 10 ppm. The central peak near -0.5 ppm reflects the calibration offset (Figure 2-2b); the side peaks are structured chance matches. Right: fractions of features with at least one candidate, with several candidate ions, and with a decoy (Ag+, Cs+) candidate. The decoys match almost as many features as the real adducts, so most MS1 matches in an unfiltered feature list are chance: annotate after feature QC and treat matches as hypotheses (`scripts/make_figures.py`).*
+*Figure 2-8. Annotation diagnostics for all 5,493 matched zebrafish features (before feature QC), against a generated sum-composition reference (`scripts/lipid_reference.py`; [M+H]+, [M+Na]+, [M+K]+). Left: errors of all candidates within 10 ppm. The central peak near -0.6 ppm reflects the calibration offset (Figure 2-2b); the side peaks are structured chance matches. Right: fractions of features with at least one candidate, with several candidate ions, and with a decoy (Ag+, Cs+) candidate. At 2 ppm the decoys match about a third as many features as the real adducts, and at 5 ppm about 70%, so many MS1 matches in an unfiltered feature list are chance: annotate after feature QC and treat matches as hypotheses (`scripts/make_figures.py`).*
 
 Normalize lipid names to the LIPID MAPS shorthand with [goslin](https://github.com/lifs-tools/pygoslin) (`from pygoslin.parser.Parser import LipidParser; LipidParser().parse("PC(16:0/18:1)").get_lipid_string()`), so that names from different sources can be compared. Use the sphingolipid hydroxyl notation (`SM 34:1;O2`), which matters for ceramides because [M+H]+ and [M-H2O+H]+ ions can be confused.
 
@@ -1528,6 +1534,11 @@ dropouts = (df.groupby("Section")[features].mean() < 1.5e-4).sum()
 keep = (morans.mean(axis=1) > 0.4) & (dropouts < 4) & (score > 0)
 ```
 
+On the three zebrafish sections of 1-5, preprocessed as for the figures of section 2 (5,457 features detected in at least 5% of the tissue pixels of one section, TIC-normalized), the score behaves exactly like this: multiplying all intensities by a constant changes the fraction of features with a positive score from almost all to almost none (Figure 3-1, left). Separate criteria do not have this problem. The figures below use the 941 features with a mean Moran's I above 0.4 that are detected in at least 5% of the tissue pixels of every section (right).
+
+![Feature selection](figures/fig_3-1_features.png)
+*Figure 3-1. Left: fraction of the 5,457 zebrafish features with a positive LBA score after all intensities were multiplied by a constant; the cutoff `score > 0` selects almost all or almost none of them depending on the scale. Right: mean Moran's I against the lowest detection fraction over the three sections; the features used for the embedding (orange) pass both criteria (`scripts/make_analysis_figures.py`).*
+
 ### 3-2 Dimensionality reduction and data integration
 <sub><a href="#top">(Back to top)</a></sub></br>
 Each pixel has hundreds of feature values, many of them correlated (lipids of one class or one cell type co-vary) and noisy. Clustering and visualization work better on a few components that summarize this co-variation, which is what dimensionality reduction provides. When pixels come from many sections, slides or animals, technical differences between them also show up in these components, and pixels then group by section rather than by tissue type. Integration removes such differences from the embedding (not from the measured values).
@@ -1561,7 +1572,9 @@ The same in generic scanpy terms (environment `msi-analysis`):
 import scanpy as sc, numpy as np, harmonypy as hm
 from sklearn.decomposition import NMF
 
-Xsel = adata[:, selected].X                    # non-negative normalized intensities (dense or sparse)
+Xsel = adata[:, selected].X                    # non-negative normalized intensities
+Xsel = Xsel.toarray() if hasattr(Xsel, "toarray") else np.asarray(Xsel)
+Xsel = Xsel / np.percentile(Xsel, 99, axis=0).clip(1e-12)   # comparable scales: abundant lipids do not dominate
 assert Xsel.min() >= 0, "NMF needs non-negative input"
 ref = (adata.obs["Condition"] == "control").values     # learn the factors on the reference set only
 nmf = NMF(n_components=16, init="nndsvda", random_state=0, max_iter=500)
@@ -1579,6 +1592,13 @@ else:
     raise ValueError(f"cannot determine the orientation of Z_corr {Z.shape}")
 ```
 
+Without a scale step like the one above, NMF mostly models the few most intense lipids, because it minimizes the squared error on the original values.
+
+In the zebrafish example, all three sections come from one embryo, so the reference set is all pixels, and Harmony is run on the section. Pixels already mix fairly well across sections: of the 15 nearest neighbours of a pixel in the NMF space, 69% come from its own section (33% would be complete mixing), and after Harmony 64% (Figure 3-2). The remaining separation is partly anatomy, because the sections cut the embryo at different depths; integration should not remove it.
+
+![NMF and Harmony](figures/fig_3-2_embedding.png)
+*Figure 3-2. UMAP of the NMF scores of all tissue pixels of the three zebrafish sections, before (left) and after (centre left) Harmony on the section, and three NMF factors in section 22 with the lipid that loads most on each (right) (`scripts/make_analysis_figures.py`).*
+
 >**NOTE**
 >Which covariates to give Harmony is a scientific decision: regress out what you are *not* interested in. Give it the units of preparation and acquisition that carry unwanted technical variation (slide, matrix coating batch, run, day), and only if they are not aliased with what you want to study. `SectionID` is not automatically a technical batch: in serial sections it also encodes anatomy (section position), and in independent samples sections are nested in animals. `Sample` (animal) is the biological replicate; do not remove it just because pixels cluster by animal. `Sex` and `Condition` are biological; remove them only to build a deliberately condition-invariant reference, as the LBA did, and keep a second, minimally corrected embedding for everything else. If you remove `Condition`, never use the corrected embedding (or anything predicted from it) to test for condition effects.
 
@@ -1592,6 +1612,11 @@ sc.pp.neighbors(adata, use_rep="X_harmony", n_neighbors=30)
 sc.tl.leiden(adata, resolution=2.0, flavor="igraph", n_iterations=2, key_added="leiden", random_state=0)
 ```
 With millions of pixels, subsample for the neighbor graph and transfer labels with a classifier, or use `n_neighbors` ~15 and a GPU implementation (rapids-singlecell). Validate such classifiers on entire held-out animals (and, if possible, acquisition runs), never on randomly held-out pixels: neighbouring pixels are nearly identical, so random splits overestimate accuracy. Report accuracy per held-out animal and per cluster.
+
+The resolution of 2.0 above was chosen for millions of pixels; for the three zebrafish sections (57,000 pixels), resolution 0.5 gives 14 clusters. They follow the anatomy of the embryo and recur in all three sections (Figure 3-3). Two clusters (0 and 8) form the outer rim of the tissue, and their marker ions (Figure 3-5) are background ions: in section 24, m/z 402.17 is about 8 times and m/z 885.04 about 4 times more intense off tissue than inside the embryo, while PC 34:1 [M+H]+ reaches only 8% of its inner level in these rim pixels. This is the rim of delocalized signal discussed in 2-2. Inspect such clusters, and remove them or tighten the mask, before interpreting them as tissue.
+
+![Leiden clusters](figures/fig_3-3_clusters.png)
+*Figure 3-3. Leiden clusters (resolution 0.5) on the Harmony-corrected NMF embedding, in the three zebrafish sections (`scripts/make_analysis_figures.py`).*
 
 **The EUCLID hierarchical splitter (LBA lipizones).** Starting from all pixels, each node is split in two:
 1. refit the seeded NMF on the pixels of the node; rank the local components by the section-consistency score; try combinations of components (up to 200);
@@ -1654,6 +1679,27 @@ postproc.xgboost_feature_restoration(
 postproc.create_lipidome_matrix(final_table, min_score=4.0)   # LBA reproduction: mixes measured + restored values
 ```
 
+The idea in a few lines, with scikit-learn (any regressor works; EUCLID uses XGBoost): train on some sections, predict a held-out one, and compare with the measured values there.
+
+```python
+import numpy as np
+from sklearn.ensemble import HistGradientBoostingRegressor
+
+held_out = "section 26"
+train = (adata.obs["sample"] != held_out).to_numpy()
+y = adata[:, lipid].X
+y = (y.toarray() if hasattr(y, "toarray") else np.asarray(y)).ravel()
+model = HistGradientBoostingRegressor(max_iter=300, learning_rate=0.05, random_state=0)
+model.fit(adata.obsm["X_harmony"][train], y[train])
+restored = model.predict(adata.obsm["X_harmony"])           # keep in a separate slot, never in X (2-9)
+print("held-out r:", np.corrcoef(restored[~train], y[~train])[0, 1])
+```
+
+Figure 3-4 does this for a well-detected zebrafish lipid that was left out of the embedding. Trained on sections 22 and 24, the restored image of section 26 correlates well with the measured one (r = 0.85), which is what the LBA's validation criterion checks. But the restored image is smoother, and more of its variance is explained by the clusters (31%, against 23% for the measured values): the prediction carries the structure of the embedding, which is the circularity described below.
+
+![Restoration from the embedding](figures/fig_3-4_restoration.png)
+*Figure 3-4. Restoration of m/z 1017.6684 in the held-out zebrafish section 26 from the Harmony-corrected NMF embedding (gradient-boosted trees trained on sections 22 and 24): measured values, restored values, and the Leiden clusters of Figure 3-3 (`scripts/make_analysis_figures.py`).*
+
 Why this needs care:
 1. **Circularity.** A restored lipid is a function of the same embedding that defined the clusters. It will look cluster-specific by construction, and cannot provide independent evidence for a cluster.
 2. **Removed biology.** The predictors come from an embedding where `Condition` (and `Sex`) were regressed out. A restored lipid can then only show condition differences indirectly, through changed cluster composition.
@@ -1676,6 +1722,9 @@ A cluster is only a label. To make it useful, describe what distinguishes it (ma
 sc.tl.rank_genes_groups(adata, groupby="lipizone", method="wilcoxon", layer="measured_scaled", use_raw=False)
 sc.pl.rank_genes_groups_dotplot(adata, n_genes=3, layer="measured_scaled")   # plot the same values
 ```
+
+![Marker lipids](figures/fig_3-5_markers.png)
+*Figure 3-5. The two top-ranked features of each zebrafish cluster of Figure 3-3 (Wilcoxon test of each cluster against all others on 0-1 scaled measured values; colour: mean scaled value, scaled per feature; dot size: fraction of pixels with signal). The ranking is computed on pixels and serves to find candidates, not to test them (`scripts/make_analysis_figures.py`).*
 
 **Anatomy.** Cross-tabulate clusters and Allen regions; the LBA used a reciprocal enrichment score (enrichment of the cluster in the region multiplied by enrichment of the region in the cluster) to name clusters after regions.
 

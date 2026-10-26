@@ -46,7 +46,7 @@ def consensus_intervals(matches, acquisitions, pad_ppm=1.0):
     return iv
 
 
-def requantify(imzml, intervals, window_da=25.0, q=0.05):
+def requantify(imzml, intervals, window_da=25.0, q=0.05, ibd=None):
     """Raw summed intensity of every interval in every pixel of one acquisition (sparse AnnData).
 
     obs['tic_spectrum']: total intensity of each spectrum (for full-spectrum TIC normalization).
@@ -54,6 +54,7 @@ def requantify(imzml, intervals, window_da=25.0, q=0.05):
     intensities (raw counts). This describes how low the retained centroids go in that part of the
     spectrum; it is a diagnostic, not a limit of detection. var['window'] maps features to windows.
     The windows are defined from the feature centres, so they are identical for all acquisitions.
+    ibd: path of the binary file if it is not next to the imzML with the same name.
     """
     if intervals.empty:
         raise ValueError("no intervals for this acquisition")
@@ -64,7 +65,7 @@ def requantify(imzml, intervals, window_da=25.0, q=0.05):
     lo, hi = iv["min"].values, iv["max"].values
     mz0 = np.floor(iv["mz"].min() / window_da) * window_da
     nwin = int((iv["mz"].max() - mz0) // window_da) + 1
-    p = ImzMLParser(imzml)
+    p = ImzMLParser(imzml, ibd_file=open(ibd, "rb")) if ibd else ImzMLParser(imzml)
     n = len(p.coordinates)
     low = np.full((n, nwin), np.nan, dtype=np.float32)
     tic = np.zeros(n)

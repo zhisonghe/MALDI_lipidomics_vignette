@@ -1,20 +1,17 @@
-"""Example figures of the tutorial, computed from the three public zebrafish sections of 1-5 (Zenodo 8410583).
+"""Example figures of the preprocessing part of the tutorial (2-2 to 2-8), computed from the three public zebrafish
+sections of 1-5 (Zenodo 8410583).
 
 Usage: python make_figures.py <folder with the .imzml/.IBD files> <output folder, e.g. ../figures>
 Environment: msi-analysis (pyimzML, numpy, scipy, pandas, anndata, scikit-image, squidpy, matplotlib).
-Peak calling uses a simple frequency-based stand-in for uMAIA (as in zebrafish_gapfill_censoring.py), so the
-script runs on a laptop in a few minutes without the msi-umaia environment.
+Peak calling uses a simple frequency-based stand-in for uMAIA (example_data.py), so the script runs on a laptop
+in a few minutes without the msi-umaia environment.
 """
 import os, re, sys, glob, warnings
 import numpy as np, pandas as pd, anndata as ad, matplotlib
 matplotlib.use("Agg"); import matplotlib.pyplot as plt
-from pyimzml.ImzMLParser import ImzMLParser, getionimage
-from skimage.filters import threshold_otsu
-from scipy import ndimage as ndi
-from scipy.ndimage import gaussian_filter1d
-from scipy.signal import find_peaks
+from pyimzml.ImzMLParser import ImzMLParser
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gapfill import consensus_intervals, requantify
+from example_data import tic_images, tissue_mask, requantified
 from lipid_reference import lipid_reference, mono
 warnings.filterwarnings("ignore")
 
@@ -33,42 +30,24 @@ PIXEL_UM = 7
 P = {a: ImzMLParser(f"{D}/{a}.imzml", ibd_file=open(f"{D}/{a}.IBD", "rb")) for a in acqs}
 
 
-def tic_images(p, lipid_range=(700, 850)):
-    """Full-spectrum TIC and the summed intensity in a lipid-rich m/z range."""
-    xs = np.array([c[0] for c in p.coordinates]) - 1; ys = np.array([c[1] for c in p.coordinates]) - 1
-    tic = np.zeros((ys.max() + 1, xs.max() + 1)); lip = np.zeros_like(tic)
-    for i, (x, y) in enumerate(zip(xs, ys)):
-        mz, it = p.getspectrum(i)
-        tic[y, x] = it.sum(); lip[y, x] = it[(mz >= lipid_range[0]) & (mz <= lipid_range[1])].sum()
-    return tic, lip
-
-
-def tissue_mask(img, smooth=0):                         # tutorial 2-2
-    logtic = np.log1p(ndi.gaussian_filter(img, smooth) if smooth else img)
-    mask = logtic > threshold_otsu(logtic[logtic > 0])
-    lb, _ = ndi.label(mask); size = np.bincount(lb.ravel()); size[0] = 0
-    mask = (size >= int(np.ceil(0.1e6 / PIXEL_UM**2)))[lb]
-    lb, _ = ndi.label(~mask); size = np.bincount(lb.ravel()); size[0] = 0
-    return mask | ((size > 0) & (size < int(np.ceil(0.01e6 / PIXEL_UM**2))))[lb]
-
-
 IMG = {a: tic_images(P[a]) for a in acqs}
 TIC = {a: IMG[a][0] for a in acqs}
-M_tic = {a: tissue_mask(TIC[a]) for a in acqs}                         # fails on these sections (matrix signal)
-M = {a: tissue_mask(IMG[a][1], smooth=1) for a in acqs}                 # lipid-range signal: used downstream
+M_tic = {a: tissue_mask(TIC[a], PIXEL_UM) for a in acqs}                         # fails: matrix signal off tissue
+M_rng = {a: tissue_mask(IMG[a][1], PIXEL_UM, smooth=1) for a in acqs}            # works on section 22 only
+M = {a: tissue_mask(IMG[a][2], PIXEL_UM, smooth=1) for a in acqs}                # reference ions: used downstream
 
-# ---- Figure 1 (2-2): TIC, an ion image and the tissue mask of one section
-a0 = acqs[0]; z = P[a0].coordinates[0][2]
-mz_k = 798.54096                                        # PC 34:1 [M+K]+
-ion = getionimage(P[a0], mz_k, tol=mz_k * 5e-6, z=z)
-fig, ax = plt.subplots(2, 2, figsize=(11, 4.6))
-for a_, (im, t) in zip(ax.ravel(), [(np.log1p(TIC[a0]), "log TIC (full spectrum)"),
-                                    (np.log1p(IMG[a0][1]), "log summed intensity, m/z 700-850"),
-                                    (M_tic[a0], "mask: Otsu on log TIC (fails: matrix signal off tissue)"),
-                                    (M[a0], "mask: Otsu on smoothed m/z 700-850 signal (used)")]):
-    a_.imshow(im, cmap="gray" if im.dtype == bool else "magma", interpolation="nearest"); a_.set_title(t, fontsize=9)
-    a_.set_xticks([]); a_.set_yticks([]); a_.grid(False)
-fig.suptitle(f"Zebrafish {lab[a0]} (7 µm raster)", fontsize=10)
+a0 = acqs[0]
+# ---- Figure 1 (2-2): TIC, reference-ion image and three masks, every section
+fig, ax = plt.subplots(len(acqs), 5, figsize=(17, 2.0 * len(acqs) + 0.6), squeeze=False)
+for r, a in enumerate(acqs):
+    for c, (im, t) in enumerate([(np.log1p(TIC[a]), "log TIC (full spectrum)"),
+                                 (np.log1p(IMG[a][2]), "log summed reference ions"),
+                                 (M_tic[a], "mask: TIC"), (M_rng[a], "mask: summed m/z 700-850"),
+                                 (M[a], "mask: summed reference ions (used)")]):
+        a_ = ax[r, c]
+        a_.imshow(im, cmap="gray" if im.dtype == bool else "magma", interpolation="nearest")
+        a_.set_title(f"{lab[a]}: {t}" if c == 0 else t, fontsize=8)
+        a_.set_xticks([]); a_.set_yticks([]); a_.grid(False)
 plt.tight_layout()
 plt.savefig(f"{OUT}/fig_2-2_qc_mask.png"); plt.close()
 
@@ -107,37 +86,7 @@ ax[1].legend(loc="best")
 plt.tight_layout(); plt.savefig(f"{OUT}/fig_2-2_calibration.png"); plt.close()
 
 # ---- peak calling (stand-in), matching and requantification (2-3, 2-4)
-BIN = 0.25e-6
-mzr = [400.0, 1600.0]
-L0 = np.log(mzr[0] * 0.999); nbin = int((np.log(mzr[1] * 1.001) - L0) / BIN) + 1
-
-
-def call_peaks(p, mask, min_frac=0.05):
-    idx = [i for i, (x, y, _) in enumerate(p.coordinates) if mask[y - 1, x - 1]]
-    counts = np.zeros(nbin)
-    for i in idx:
-        mz, it = p.getspectrum(i)
-        b = ((np.log(mz[it > 0]) - L0) / BIN).astype(int); b = b[(b >= 0) & (b < nbin)]
-        np.add.at(counts, b, 1)
-    sm = gaussian_filter1d(counts, 2); tot = np.convolve(counts, np.ones(21), mode="same")
-    pk, _ = find_peaks(sm, distance=4); pk = pk[tot[pk] >= min_frac * len(idx)]
-    c = np.exp(L0 + (pk + 0.5) * BIN); lo, hi = c * (1 - 2.5e-6), c * (1 + 2.5e-6)
-    mid = (hi[:-1] + lo[1:]) / 2; ov = hi[:-1] > lo[1:]; hi[:-1][ov], lo[1:][ov] = mid[ov], mid[ov]
-    return pd.DataFrame({"mz_estimated": c, "min": lo, "max": hi})
-
-
-dfl = [call_peaks(P[a], M[a]) for a in acqs]
-pk = pd.concat([d.assign(acq=a) for d, a in zip(dfl, acqs)]).sort_values("mz_estimated").reset_index(drop=True)
-gap = np.diff(pk.mz_estimated.values) / pk.mz_estimated.values[1:] * 1e6
-pk["feature"] = np.concatenate([[0], np.cumsum(gap > 3)])
-pk = pk.drop_duplicates(["feature", "acq"])
-iv = consensus_intervals(pk[["feature", "acq", "min", "max", "mz_estimated"]], acqs)
-complete = iv.groupby("feature").acq.nunique() == len(acqs)
-iv = iv[iv.feature.isin(complete[complete].index)]
-A = {}
-for a in acqs:
-    B = requantify(f"{D}/{a}.imzml", iv[iv.acq == a]); xy = B.obsm["spatial"]
-    A[a] = B[M[a][xy[:, 1] - 1, xy[:, 0] - 1]].copy()
+A = requantified({a: (f"{D}/{a}.imzml", f"{D}/{a}.IBD") for a in acqs}, M)
 
 # ---- Figure 3 (2-4): detection of gap-filled features after requantification
 called = pd.DataFrame({a: A[a].var.called.values for a in acqs}, index=A[acqs[0]].var_names)
@@ -230,5 +179,25 @@ ax[1].legend(loc="upper left")
 plt.tight_layout(); plt.savefig(f"{OUT}/fig_2-8_tolerance.png"); plt.close()
 
 print(f"features {len(peaks)}; gaps {len(dets)}; Moran's I median {mi.median():.2f}")
+# numbers quoted in the tutorial text
+partial = ((nc > 0) & (nc < len(acqs))).sum()
+print(f"2-2: tissue pixels {[int(M[a].sum()) for a in acqs]}; median error per section "
+      + ", ".join(f"{lab[a]} {err[err.acq == a].ppm.median():+.2f}" for a in acqs)
+      + f"; per-ion medians {err.groupby('ion').ppm.median().round(2).to_dict()}")
+print(f"2-4: {partial} of {len(nc)} features called in some but not all sections; {len(dets)} gaps; "
+      f">= 1%: {(dets >= 0.01).mean():.3f}; 1-5%: {((dets >= 0.01) & (dets < 0.05)).mean():.3f}")
+print(f"2-5: Moran's I on {len(mi)} features of {lab[a0]}")
+low_raw = {lab[a]: float(np.nanmedian(A[a].obsm["low_centroid"][tics[a] > 0])) for a in acqs}
+low_tic = {lab[a]: float(np.nanmedian(A[a].obsm["low_centroid"][tics[a] > 0] * (med / tics[a][tics[a] > 0])[:, None])) for a in acqs}
+print(f"2-6: low-centroid raw {low_raw}; TIC scale {low_tic}; median feature TIC {[float(np.median(tics[a][tics[a] > 0])) for a in acqs]}")
+per = pd.DataFrame({a: np.nanmedian(A[a].obsm["low_centroid"][tics[a] > 0] * (med / tics[a][tics[a] > 0])[:, None], axis=0) for a in acqs}).T
+thr = np.nan_to_num(per.max().to_numpy(), nan=0.0)
+kept = nz = 0
+for a in acqs:
+    Xs = A[a].X.multiply((med / np.where(tics[a] > 0, tics[a], 1))[:, None]).tocoo()
+    kept += int((Xs.data >= thr[A[a].var["window"].to_numpy()][Xs.col]).sum()); nz += Xs.nnz
+print(f"2-6: censored copy keeps about {kept / nz:.3f} of nonzero values")
+hist, edges = np.histogram(wide.ppm, bins=80)
+print(f"2-8: error histogram mode {edges[np.argmax(hist)] + (edges[1] - edges[0]) / 2:+.2f} ppm")
 print(curve.round(3).to_string(index=False))
 print("figures written to", OUT)
