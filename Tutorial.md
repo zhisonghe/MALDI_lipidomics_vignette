@@ -1,5 +1,5 @@
 # Tutorial for MALDI mass spectrometry imaging (spatial lipidomics) data preprocessing and analysis
-#### Draft compiled on 27 Sep 2026, revised on 25 Oct 2026
+#### Draft compiled on 27 Sep 2026, revised on 26 Oct 2026
 ### Table of Contents
   * [Introduction](#introduction)
   * [Preparation](#preparation)
@@ -87,7 +87,7 @@ In practice: do conversion and peak calling on a Linux server or HPC (one job pe
 
 ### 1-3. Data formats: vendor raw files and imzML
 <sub><a href="#top">(Back to top)</a></sub></br>
-Every vendor has its own raw format:
+Each instrument writes its data in the vendor's own format, which most analysis tools cannot read, so the data are converted to an open format before processing. It helps to know what that format contains, because several practical problems later (slow reading, file names, misleading metadata) come from it. Every vendor has its own raw format:
 
 | Vendor / instrument | Raw format | Notes |
 |---|---|---|
@@ -321,7 +321,7 @@ and then `tar -xzf LipidAtlas_uMAIA_subset.tar.gz; tar -xzf LipidAtlas_masks.tar
 
 ## Preprocessing of MALDI-MSI data
 <sub><a href="#top">(Back to top)</a></sub></br>
-The overall preprocessing flow, with the tools used in the LBA and the main open-source alternatives, looks like this:
+Preprocessing turns the raw spectra into a table that can be analysed: one row per tissue pixel, one column per ion, with intensities that are comparable between pixels and samples, and with a lipid name for each column as far as one can be given. Each step below solves one problem on the way there, which is stated at the start of its section. The overall flow, with the tools used in the LBA and the main open-source alternatives, looks like this:
 
 ```
  vendor raw (.RAW/.UDP, .d)
@@ -346,6 +346,8 @@ The overall preprocessing flow, with the tools used in the LBA and the main open
 
 ### 2-1 Conversion to imzML
 <sub><a href="#top">(Back to top)</a></sub></br>
+Vendor raw files can only be read with the vendor's software or libraries, while most open-source MSI tools, including uMAIA, Cardinal and METASPACE, read imzML (1-3). The first step is therefore to convert each acquisition to imzML. It is also the cheapest moment to catch problems: a failed or incomplete conversion, or acquisitions recorded with different settings, should be found before hours of computing are spent on them.
+
 **Thermo AP-SMALDI (LBA setup).** The LBA converted `.RAW`/`.UDP` pairs to imzML with RAW2IMZML v1.0r47 (Windows). The conversion is done per acquisition; conventionally, name the output after the acquisition, which in the LBA encodes date, sample, section, raster size and attenuation, e.g. `20220411_MouseBrain_female_217G_349x316_Att30_25um`. Keep this naming, because uMAIA and EUCLID use the name as the acquisition identifier.
 
 **Bruker timsTOF.** Use TIMSCONVERT (open source, but it bundles the Bruker SDK, so Windows/Linux only):
@@ -367,9 +369,20 @@ Settings that differ between acquisitions are not necessarily a problem, but the
 
 ### 2-2 Quality control of individual acquisitions and tissue masks
 <sub><a href="#top">(Back to top)</a></sub></br>
-Before peak calling, look at every acquisition. The typical failure modes are: uneven matrix coating (gradients in total ion current, TIC), stripes from laser/stage problems, tissue damage (folds, tears), low yield, and mass calibration drift. The LBA excluded "damaged or low MALDI yield" sections and kept a `BadSection` flag in the acquisition metadata; do the same.
+Every later step treats the acquisitions as comparable measurements of tissue. Problems that are not caught here end up in the results, often in a form that can no longer be recognized. Before peak calling, three questions need an answer for every acquisition:
 
-A minimal QC script with pyimzML (environment `msi-analysis`):
+1. **Did the acquisition work?** Uneven matrix coating, stripes from laser or stage problems, tissue damage (folds, tears) and low ion yield change the intensities in ways that normalization (2-6) cannot undo. Most of these problems are visible in the image of the total ion current (TIC), i.e. the summed intensity of each pixel's spectrum. Exclude acquisitions that fail, or flag them; the LBA excluded "damaged or low MALDI yield" sections and kept a `BadSection` flag in the acquisition metadata.
+2. **Are the m/z values accurate?** Matching features across acquisitions (2-4) and annotation (2-8) compare m/z values with tolerances of a few ppm, so a calibration error of 1-2 ppm uses up a large part of the tolerance. The error can be measured with *reference ions*: ions that are abundant in every acquisition and whose exact m/z is known from their formula. In positive mode with DHB, the [M+H]+, [M+Na]+ and [M+K]+ ions of an abundant phosphatidylcholine such as PC 34:1 are a good start. The difference between the observed and the theoretical m/z of these ions, in ppm, is the mass error.
+3. **Which pixels are tissue?** The raster is a rectangle that covers the sample and the glass around it. Pixels outside the tissue still have spectra (matrix ions, salt clusters, analytes that spread during matrix application), but they do not measure the tissue. Left in, they lower sample means and detection fractions, enter the normalization (2-6) and distort spatial statistics such as Moran's I (2-5). A *tissue mask*, a boolean image with `True` for tissue pixels, keeps them out of every later step. uMAIA expects one mask per acquisition, as `data/<acquisition>/mask.npy`, with the same shape as the extracted images.
+
+**Choosing reference ions.** A reference ion must have no other ion within a few ppm, otherwise the measured "error" is the distance to the other ion. In positive mode this is a real risk, because sodium adducts fall close to protonated ions of other lipids: "PC 38:6 [M+H]+" (m/z 806.5694) and PC 36:3 [M+Na]+ (m/z 806.5670) are only 3.0 ppm apart, as are "PE 38:4 [M+H]+" (768.5538) and PE 36:1 [M+Na]+ (768.5514). If some reference ions sit at -3 ppm while all others are within 0.5 ppm, you are probably looking at the sodium adduct. Use ions without such near-isobars, spread over the m/z range, and set a minimal intensity so that noise centroids near the reference m/z are not counted as matches.
+
+**Making the tissue mask.** The mask is a threshold on an image in which tissue is brighter than the background; Otsu's method chooses the threshold that best separates the two groups of pixel values. Which image is thresholded matters more than the method. The TIC seems the obvious choice, but it includes the matrix ions, which can be as strong off tissue as on it. Otsu on the TIC then follows matrix patches and misses parts of the tissue (Figure 2-2a, bottom left). An image of signal that comes from the tissue avoids this: the summed intensity in an m/z range dominated by membrane lipids (e.g. m/z 700-850 in positive mode), or the image of one abundant tissue lipid. Light smoothing (a Gaussian with a sigma of one pixel) removes pixel-to-pixel noise before the threshold is applied (Figure 2-2a, bottom right). After thresholding, remove small isolated pieces (noise, matrix crystals) and fill only small holes. Do not fill all holes or keep only the largest piece: many tissues contain cavities without tissue (ventricles, vessels, lumens of glands or organoids), which must stay outside the mask, and one raster can contain several samples or detached tissue pieces. No rule works for every tissue, so always look at the mask next to the TIC and ion images, and correct it by hand where needed (e.g. by drawing in napari).
+
+![Tissue masks of a zebrafish section](figures/fig_2-2_qc_mask.png)
+*Figure 2-2a. Zebrafish section 22 of 1-5 (7 µm raster). Otsu on the full-spectrum TIC (bottom left) follows matrix signal off the tissue and misses parts of the embryo; Otsu on the lightly smoothed summed intensity of m/z 700-850 (bottom right) gives a usable mask, which the other figures use (`scripts/make_figures.py`).*
+
+A minimal QC script with pyimzML that does all three (environment `msi-analysis`):
 
 ```python
 import os, numpy as np, matplotlib.pyplot as plt
@@ -381,14 +394,17 @@ name = "20220411_MouseBrain_female_217G_349x316_Att30_25um"
 p = ImzMLParser(f"imzml/{name}.imzML")
 pixel_um = 25                                           # raster step in µm (imzML header: "pixel size x")
 z = p.coordinates[0][2]                                 # imaging plane, passed to getionimage below
+lipid_range = (700, 850)                                # m/z range dominated by membrane lipids (positive mode)
 
-# 1) TIC image
+# 1) TIC image, and the summed intensity in the lipid range for the mask
 xs = np.array([c[0] for c in p.coordinates]) - 1
 ys = np.array([c[1] for c in p.coordinates]) - 1
 tic = np.zeros((ys.max() + 1, xs.max() + 1))
+lip = np.zeros_like(tic)
 for i, (x, y) in enumerate(zip(xs, ys)):
     mzs, ints = p.getspectrum(i)
     tic[y, x] = ints.sum()
+    lip[y, x] = ints[(mzs >= lipid_range[0]) & (mzs <= lipid_range[1])].sum()
 
 # 2) mass accuracy on reference ions (positive mode, DHB): PC 34:1 [M+H]+, [M+Na]+, [M+K]+
 refs = {"PC 34:1 +H": 760.5851, "PC 34:1 +Na": 782.5670, "PC 34:1 +K": 798.5410}
@@ -409,11 +425,11 @@ for lab, mz in refs.items():
     else:
         print(f"{lab}: not detected")
 
-# 3) tissue mask: Otsu threshold on log TIC, remove isolated noise pixels, fill only pinholes
-logtic = np.log1p(tic)
-if np.count_nonzero(logtic > 0) < 100:
+# 3) tissue mask: Otsu threshold on the smoothed log lipid-range signal, remove small pieces, fill only pinholes
+sig = np.log1p(ndi.gaussian_filter(lip, 1))
+if np.count_nonzero(sig > 0) < 100:
     raise ValueError(f"{name}: (almost) no signal, check the acquisition")
-mask = logtic > threshold_otsu(logtic[logtic > 0])
+mask = sig > threshold_otsu(sig[sig > 0])
 min_piece = int(np.ceil(0.1e6 / pixel_um**2))   # keep tissue pieces >= 0.1 mm^2
 max_hole = int(np.ceil(0.01e6 / pixel_um**2))   # fill holes < 0.01 mm^2 (pinholes), not cavities
 lab, _ = ndi.label(mask); size = np.bincount(lab.ravel()); size[0] = 0
@@ -425,37 +441,31 @@ print("tissue pixels:", mask.sum(), "| on raster border:", np.count_nonzero(mask
 os.makedirs(f"data/{name}", exist_ok=True)
 np.save(f"data/{name}/mask.npy", mask)
 
-fig, ax = plt.subplots(1, 3, figsize=(12, 4))
-ax[0].imshow(logtic); ax[0].set_title("log TIC")
-ax[1].imshow(getionimage(p, 798.5410, tol=798.5410 * 5e-6, z=z)); ax[1].set_title("m/z 798.541")
-ax[2].imshow(mask); ax[2].set_title("tissue mask")
+fig, ax = plt.subplots(1, 4, figsize=(16, 4))
+ax[0].imshow(np.log1p(tic)); ax[0].set_title("log TIC")
+ax[1].imshow(np.log1p(lip)); ax[1].set_title(f"log summed m/z {lipid_range[0]}-{lipid_range[1]}")
+ax[2].imshow(getionimage(p, 798.5410, tol=798.5410 * 5e-6, z=z)); ax[2].set_title("m/z 798.541")
+ax[3].imshow(mask); ax[3].set_title("tissue mask")
 plt.savefig(f"qc_{name}.png", dpi=150)
 ```
 
+The size limits are in mm², converted to pixels with the raster step, so that they mean the same at different pixel sizes. Adapt them to your samples, and the m/z range to your polarity, matrix and tissue (it should contain abundant tissue ions and few matrix ions).
+
 >**NOTE**
->* The mask matters more than it seems. It defines which pixels enter the normalization model (2-6) and which pixels count for Moran's I (2-5). uMAIA expects one boolean `mask.npy` per acquisition at `data/<acquisition>/mask.npy`, with the same shape as the extracted images.
->* Otsu on TIC fails when the matrix itself gives strong signal outside the tissue. Then use a tissue-specific ion instead of the TIC (for brain in positive mode, PC 34:1 or a sphingomyelin), or draw the mask manually in napari.
->* Do not fill all holes (`binary_fill_holes`) or keep only the largest component by default. Many tissues contain cavities without tissue (ventricles, vessels, glandular lumens, the lumens of organoids), and filling them adds background pixels to the mask. Keeping only the largest component drops detached tissue pieces, and drops all but one sample if several samples share one raster. Fill only small holes, and remove only small objects.
->* Check whether the mask touches the border of the raster. If it does, the acquisition did not cover the whole sample, which matters for anything computed per sample (sample means, detection fractions, region proportions).
+>* Check whether the mask touches the border of the raster (printed above). If it does, the acquisition did not cover the whole sample, which matters for anything computed per sample (sample means, detection fractions, region proportions).
 >* Off-tissue pixels are rarely empty: delocalized analytes and matrix-salt adducts (e.g. [M+Na]+ ions with DHB) can be *detected* in nearly every off-tissue pixel while being one to two orders of magnitude weaker than on tissue. When you compare tissue with background (here and in 2-5), compare intensities, not detection rates.
 >* The LBA additionally refined masks after registration by removing pixels that map outside the CCF brain volume (2-9).
 
-![Tissue masks of a zebrafish section](figures/fig_2-2_qc_mask.png)
-*Figure 2-2a. Zebrafish section 22 of 1-5 (7 µm raster). Otsu on the full-spectrum TIC (bottom left) follows matrix signal off the tissue and misses parts of the embryo; Otsu on the lightly smoothed summed intensity of m/z 700-850 (bottom right) gives a usable mask, which the other figures use (`scripts/make_figures.py`).*
-
 **Compare acquisitions with each other.** Collect simple per-acquisition summaries over tissue pixels: median TIC, median number of centroids per pixel, the intensity of a few reference ions, and the mass error. Large differences between acquisitions (e.g. a several-fold difference in TIC, or many more centroids per pixel in one run because of a different noise level) are technical until shown otherwise and determine how much the normalization (2-6) has to do.
 
-**Mass calibration.** Whether to recalibrate depends on the observed errors relative to the tolerance you will use for matching and annotation, not on the analyzer type: recalibrate when the systematic error or its drift over m/z, position or acquisition time uses up a material part of that tolerance (a reproducible 1-2 ppm offset matters for sub-ppm annotation). Plot the error of several unambiguous ions spanning the mass range against m/z, position and acquisition time; then correct with a constant, linear (in m/z) or position/time-dependent model as the residuals require (Cardinal `recalibrate()`, lock-mass correction during acquisition, or a regression on reference ions), and check the residuals on ions not used for fitting. Do not recalibrate on database matches selected from the same data.
+**Mass calibration.** Whether to recalibrate depends on the observed errors relative to the tolerance you will use for matching and annotation, not on the analyzer type: recalibrate when the systematic error or its drift over m/z, position or acquisition time uses up a material part of that tolerance (a reproducible 1-2 ppm offset matters for sub-ppm annotation). Plot the error of several unambiguous reference ions spanning the mass range against m/z, position and acquisition time (Figure 2-2b); then correct with a constant, linear (in m/z) or position/time-dependent model as the residuals require (Cardinal `recalibrate()`, lock-mass correction during acquisition, or a regression on reference ions), and check the residuals on ions not used for fitting. Do not recalibrate on database matches selected from the same data.
 
 ![Mass error of reference ions](figures/fig_2-2_calibration.png)
 *Figure 2-2b. Median mass error of nine reference ions (PC adducts and the PC 34:1 in-source fragment) in the tissue pixels of the three zebrafish sections, against m/z (left) and acquisition order (right). All sections are offset by about -0.5 to -1 ppm without a consistent drift over the acquisition. The highest ion, PC 36:1 [M+Na]+, deviates upward in all three sections, which points to an unresolved neighbouring ion rather than to calibration (`scripts/make_figures.py`).*
 
->**NOTE**
->An apparent mass error of exactly the same size for several ions in all acquisitions is often not a calibration error but a different ion. In positive mode, for example, "PC 38:6 [M+H]+" (m/z 806.5694) and PC 36:3 [M+Na]+ (m/z 806.5670) are only 3.0 ppm apart, as are "PE 38:4 [M+H]+" (768.5538) and PE 36:1 [M+Na]+ (768.5514). If the reference ions you use for the mass accuracy check sit at -3 ppm while all others are within 0.5 ppm, you are probably looking at the sodium adduct. Use only reference ions without such near-isobars, or check both candidates.
-
 ### 2-3 Peak calling (image extraction)
 <sub><a href="#top">(Back to top)</a></sub></br>
-Peak calling decides which m/z intervals are "features". The standard approaches are:
+After conversion, each pixel is a list of centroids (m/z values with intensities), a few hundred to a few thousand per pixel. The same ion gives slightly different m/z values in different pixels, and no two pixels have the same list, so pixels cannot be compared directly. Peak calling groups the centroids into *features*: m/z intervals that each contain one ion. Summing the intensities inside an interval then gives that ion's value in every pixel, i.e. its image. Intervals that are too wide merge different ions; intervals that are too narrow split one ion into several features. The standard approaches are:
 * **Fixed binning**: cut the m/z axis into bins of constant width in Da (e.g. 0.01 Da) or in ppm (log-spaced bins whose width in Da grows with m/z, e.g. 5 ppm). Simple, but a molecule whose m/z drifts can be split across bins, and two molecules can share one bin.
 * **Peak picking on a mean spectrum**, then extracting intervals around the peaks (Cardinal, MALDIquant, SCiLS).
 * **Targeted extraction** of known m/z values (pyimzML `getionimage`, Cardinal reference peaks, vendor software). METASPACE is different: it scores formula + adduct hypotheses (isotope pattern, spatial isotope co-localization, spatial structure) with a target-decoy FDR, see 2-8.
@@ -527,18 +537,19 @@ Parameter meaning and how to choose them:
 | `approximate_interval` | 0.1 | Size (Da) of m/z chunks processed in parallel | Rarely |
 | `spectrum_range` | (400, 1200) | m/z range to process | **Set it to your acquisition range.** The LBA acquired m/z 400-1,600 but the CLI default stops at 1,200; whether they changed it is not documented. Note that the CLI declares this argument with `type=tuple`, so `--spectrum_range 400,1600` becomes a tuple of characters; change the default in `extract_images.py` (or call `uMAIA.pf.run()` from Python) instead |
 
+**Raw or TIC-divided images.** uMAIA divides each image by the pixel's TIC *inside* `save_images` (argument `normalization='tic'`), so the images in `images.h5ad` are already TIC-normalized before the uMAIA normalization of 2-6. This is easy to overlook when reading the uMAIA paper. The TIC is computed over the *full* spectrum, including matrix and noise centroids, and `uMAIA.pf.run()` does not let you change this. To normalize later on curated features only (recommended when acquisitions differ in noise level, see 2-6), extract raw (summed, not divided) images: write the intervals first, then the images:
+```python
+from uMAIA.peak_finding._run import save_images
+uMAIA.pf.run(directory_path=os.path.join(path_save, name), smz=smz,
+             spectrum_range=(400, 1200), threshold_count=8., approximate_interval=0.2,
+             smoothing=1., parallelize=True, saveimages=False)        # ranges.csv only
+df_ranges = pd.read_csv(os.path.join(path_save, name, "ranges.csv"), index_col=0)
+df_ranges = df_ranges[df_ranges.num_pixels > 100]
+save_images(smz, df=df_ranges, filepath=os.path.join(path_save, name, "images_raw.h5ad"),
+            normalization=None, clip=100, coordinates=smz.reader.coordinates)
+```
+
 >**NOTE**
->* The TIC division happens *inside* `save_images` (argument `normalization='tic'`), i.e. uMAIA images are already TIC-normalized before the uMAIA normalization of section 2-6. This is easy to overlook when reading the uMAIA paper. The TIC is computed over the *full* spectrum, including matrix and noise centroids, and `uMAIA.pf.run()` does not let you change this. If you want to normalize later on curated features only (recommended when acquisitions differ in noise level, see 2-6), extract raw (summed, not divided) images:
->  ```python
->  from uMAIA.peak_finding._run import save_images
->  uMAIA.pf.run(directory_path=os.path.join(path_save, name), smz=smz,
->               spectrum_range=(400, 1200), threshold_count=8., approximate_interval=0.2,
->               smoothing=1., parallelize=True, saveimages=False)        # ranges.csv only
->  df_ranges = pd.read_csv(os.path.join(path_save, name, "ranges.csv"), index_col=0)
->  df_ranges = df_ranges[df_ranges.num_pixels > 100]
->  save_images(smz, df=df_ranges, filepath=os.path.join(path_save, name, "images_raw.h5ad"),
->              normalization=None, clip=100, coordinates=smz.reader.coordinates)
->  ```
 >* `num_pixels` in `ranges.csv` (and every pixel-count threshold based on it) counts pixels over the whole raster, including off-tissue pixels.
 >* `threshold_count` is an absolute count of pixels per m/z bin. Its meaning therefore depends on the size of the sample: 8 is negligible for a 100,000-pixel brain section, but it is a real constraint for a sample of a few thousand pixels, where a lipid restricted to a small structure is detected in only a few dozen pixels. Check region-specific ions with `uMAIA.vis.plot_freqmz` before choosing it.
 >* Because the peak finder uses detection frequency, low-intensity but widespread signals are picked up well, while intense but spatially very restricted signals (few pixels) can be missed if they are below `threshold_count`. Check a few known region-specific lipids.
@@ -572,7 +583,7 @@ For high-resolution Orbitrap/FT-ICR centroid data, skip `smooth()` and `reduceBa
 
 ### 2-4 Matching features across acquisitions
 <sub><a href="#top">(Back to top)</a></sub></br>
-Peak calling per section yields slightly different m/z values for the same molecule in different sections (calibration differences of 1-3 ppm). Before any joint analysis, features must be matched.
+Peak calling is done for each acquisition separately, so each acquisition has its own feature list. The same molecule appears in each list with a slightly different m/z (calibration differences of 1-3 ppm), and some molecules are called in some acquisitions but not in others. Before acquisitions can be analysed together, features of different acquisitions that are the same ion must become one column of the final table. This section does this in two parts: matching the features across acquisitions, and then requantifying every matched feature in every acquisition, so that a feature that was not called in one acquisition still gets a value there.
 
 #### uMAIA matching (LBA pipeline)
 uMAIA formulates matching as a network-flow problem: within each 1-Da window, every detection in every acquisition is a node; edges connect detections of nearby acquisitions (in a random order of acquisitions, looking back `NUM_SKIP = ceil(n/2)` acquisitions) whose m/z differ by less than `MAX_DIST`, keeping the `K=3` nearest candidates; the cost of an edge is the m/z difference, and the cost of starting or ending a path is log(number of acquisitions). Gurobi then selects edges so that every detection lies on exactly one path; the connected components of the selected edges are "molecules". This is repeated for several random acquisition orders and the best solution is kept.
@@ -587,7 +598,7 @@ acquisitions = [
 ]
 ranges_files = [os.path.join("data", a, "ranges.csv") for a in acquisitions]
 # images.h5ad: uMAIA default, already divided by the full-spectrum TIC (reproduces the LBA; no second TIC step later)
-# images_raw.h5ad: raw sums (2-3 NOTE), for pixel-level normalization on curated features in 2-6
+# images_raw.h5ad: raw sums (2-3, "Raw or TIC-divided images"), for pixel-level normalization on curated features in 2-6
 image_file = "images.h5ad"
 images_files = [os.path.join("data", a, image_file) for a in acquisitions]
 
@@ -770,7 +781,7 @@ As an illustration with the three zebrafish sections of 1-5 (simple frequency-ba
 
 ### 2-5 Feature quality control
 <sub><a href="#top">(Back to top)</a></sub></br>
-Matching typically yields tens of thousands of features (the LBA started with 26,874). Many are noise, matrix clusters, isotopes or redundant adducts; the proportions depend on the data. The LBA applied these filters, in this order, before normalization:
+Matching typically yields tens of thousands of features (the LBA started with 26,874). Many are noise, matrix clusters, isotopes or redundant adducts; the proportions depend on the data. Such features are not harmless extra columns: they add noise to embeddings and clustering, enter the normalization factors (2-6) and increase the number of tests. Feature QC removes or flags them, using properties that real tissue ions have and noise does not: reproducibility across pixels and samples, enrichment in tissue over background, spatial structure, and chemistry (isotopes, adducts). The LBA applied these filters, in this order, before normalization:
 
 | Filter | Rationale | LBA implementation |
 |---|---|---|
@@ -876,7 +887,7 @@ A pipeline usually combines one pixel-level and one cross-sample method. The key
 There is no universally best method. Where possible, compare two or three choices and check that conclusions do not depend on them.
 
 #### Pixel-level normalization on curated features
-Compute the normalization factor only over the features that passed the QC of 2-5, using raw (not yet TIC-divided) images (see 2-3 for how to get them from uMAIA). Rescale by **one global constant** (the median over all tissue pixels of all samples), not by a per-sample constant, so that values stay on the same scale across samples:
+The full-spectrum TIC also contains matrix and noise centroids. When acquisitions differ in noise level, their TICs differ for reasons that have nothing to do with the tissue, and so do the normalized values. Compute the normalization factor only over the features that passed the QC of 2-5, using raw (not yet TIC-divided) images (see 2-3 for how to get them from uMAIA). Rescale by **one global constant** (the median over all tissue pixels of all samples), not by a per-sample constant, so that values stay on the same scale across samples:
 
 ```python
 import numpy as np
@@ -927,7 +938,7 @@ The censored copy deliberately discards low values in the more sensitive acquisi
 **Order of operations.** Feature QC, pixel normalization and censoring depend on each other. A workable order: (1) a permissive recurrence filter on the requantified raw data (2-5); (2) provisional pixel normalization on the retained features; (3) the censoring diagnostic above; (4) the final recurrence, tissue-enrichment and spatial filters, computed on the data you will analyse (and, for the sensitivity analysis, also on the censored copy); (5) pixel normalization recomputed on this frozen feature set; (6) all thresholds fixed before any comparison between conditions.
 
 #### Pixel-level: internal standards
-Spray a mixture of isotope-labelled or odd-chain lipid standards (one or more per class) onto the section together with, or before, the matrix. Each endogenous lipid image is divided pixel-wise by the image of the standard of its class and multiplied by the known surface concentration of the standard. Vandenbosch et al. showed that this corrects class-specific ion suppression that TIC normalization does not, changes apparent distributions (e.g. sulfatide contrast in white matter) and removes laser-induced streaks.
+TIC-type normalization assumes that ion suppression affects all lipids alike. It does not: suppression depends on the lipid class and on the local tissue composition (e.g. grey vs white matter). An internal standard of the same class, applied evenly over the section, measures it directly. Spray a mixture of isotope-labelled or odd-chain lipid standards (one or more per class) onto the section together with, or before, the matrix. Each endogenous lipid image is divided pixel-wise by the image of the standard of its class and multiplied by the known surface concentration of the standard. Vandenbosch et al. showed that this corrects class-specific ion suppression that TIC normalization does not, changes apparent distributions (e.g. sulfatide contrast in white matter) and removes laser-induced streaks.
 
 Internal standards do not by themselves make amounts of different lipids comparable: within a class, the response differs with chain length, unsaturation and adduct, so cross-lipid comparisons need lipid-specific response factors (several standards per class, or calibration). Nor do they give absolute quantities: a surface-applied standard is not extracted from the tissue like the endogenous lipids, and absolute values need calibration (e.g. dilution series of standards on tissue or tissue mimetics) and validation of linearity and limits of detection.
 
@@ -996,7 +1007,7 @@ diagnostics(LA, meta, "before")
 If samples separate by slide or run in the PCA of the log pseudo-bulk profiles (or the per-sample median TIC differs systematically between slides), that is evidence to investigate, not proof of a technical effect: anatomy, tissue composition or condition may differ between slides too, and the absence of visible separation does not exclude lipid-specific batch effects. Technical replicates or reference material are the best evidence. After normalization, run the same diagnostics again: the slide structure should be reduced to the extent that technical controls support. Do not choose a normalization because it makes the expected condition difference look stronger.
 
 #### Cross-sample: global scaling factors
-Compute each sample's log ratios to a reference profile (the geometric mean over samples) on the anchor features, and summarize them robustly: the median (as in DESeq2's median-of-ratios) or a trimmed mean of log ratios (inspired by edgeR's TMM, but without its weighting; not the same method). For per-batch factors, average the sample-level estimates within each slide or run:
+The simplest cross-sample correction is one factor per sample or batch, under the assumption that most lipids do not change between samples. Compute each sample's log ratios to a reference profile (the geometric mean over samples) on the anchor features, and summarize them robustly: the median (as in DESeq2's median-of-ratios) or a trimmed mean of log ratios (inspired by edgeR's TMM, but without its weighting; not the same method). For per-batch factors, average the sample-level estimates within each slide or run:
 
 ```python
 from scipy.stats import trim_mean
@@ -1013,7 +1024,7 @@ Xn = apply_factors(X, sample, sf_slide)
 ```
 
 #### Cross-sample: stable reference features
-Instead of all anchors, use a subset of features assumed to be constant: either known in advance (a lipid that is stable across your conditions by prior evidence), or chosen from the data as the features that vary least between samples after a first global scaling. Selecting them from the same data is partly circular (it favours features that the first scaling already made look constant); prefer features known in advance or validated on reference material, and with few samples check that the selected features are spread over the intensity range and over lipid classes:
+When many lipids may change between conditions, the assumption that most lipids are stable is doubtful. Instead of all anchors, use a subset of features assumed to be constant: either known in advance (a lipid that is stable across your conditions by prior evidence), or chosen from the data as the features that vary least between samples after a first global scaling. Selecting them from the same data is partly circular (it favours features that the first scaling already made look constant); prefer features known in advance or validated on reference material, and with few samples check that the selected features are spread over the intensity range and over lipid classes:
 
 ```python
 L1 = LA.add(np.log(sf_median), axis=0)                      # after a first global scaling
@@ -1093,7 +1104,7 @@ Xn = apply_factors(X, sample, np.exp(logf))
 >* Treat it as an exploratory option or sensitivity analysis, not as a default; it is useful when the diagnostics show intensity-dependent differences that a single factor does not remove.
 
 #### Cross-sample: uMAIA normalization (LBA pipeline)
-For each feature v and section s, uMAIA models the log intensities of the masked pixels as a mixture of two Gaussians: a background mode with mean `locs[v]` and SD `scale1[v]`, and a foreground mode with mean
+uMAIA's normalization was designed for many serial sections of one organ: it removes differences in each lipid's intensity distribution between sections that it considers technical. For each feature v and section s, uMAIA models the log intensities of the masked pixels as a mixture of two Gaussians: a background mode with mean `locs[v]` and SD `scale1[v]`, and a foreground mode with mean
 
 ```
 locs[v] + delta_[s,v] + b_lambda[v] * b_gamma[s] + error[s,v]
@@ -1180,9 +1191,9 @@ Whatever you choose, a method can only remove what it assumes to be technical. I
 
 ### 2-7 Registration to a reference atlas
 <sub><a href="#top">(Back to top)</a></sub></br>
-Registration to a reference atlas only applies to stereotyped organs for which an atlas exists (mouse and rat brain, some other organs, model organism embryos). Non-stereotyped samples, such as organoids, tumours, biopsies or cultured cells, have no common coordinate system; skip this step, and at most register each MSI image to histology or immunofluorescence of the same or an adjacent section (see the alternatives below), to define regions of interest.
+Pixel coordinates are only meaningful within one acquisition: the same anatomical structure sits at different coordinates in every section. Registration maps all sections into one coordinate system, so that pixels can be compared by position and labelled by region. For brain data, registering every section to the Allen Mouse Brain Common Coordinate Framework (CCFv3) gives each pixel 3D coordinates and an anatomical label, and allows integration with all other CCF-registered data (MERFISH/Slide-seq cell type atlases, the connectome, ISH). For serial sections of tissues without an atlas, section-to-section alignment is enough for 3D reconstruction.
 
-For brain data, registering every section to the Allen Mouse Brain Common Coordinate Framework (CCFv3) gives each pixel 3D coordinates and an anatomical label, and allows integration with all other CCF-registered data (MERFISH/Slide-seq cell type atlases, the connectome, ISH). For serial sections of tissues without an atlas, section-to-section alignment is enough for 3D reconstruction.
+Registration to a reference atlas only applies to stereotyped organs for which an atlas exists (mouse and rat brain, some other organs, model organism embryos). Non-stereotyped samples, such as organoids, tumours, biopsies or cultured cells, have no common coordinate system; skip this step, and at most register each MSI image to histology or immunofluorescence of the same or an adjacent section (see the alternatives below), to define regions of interest.
 
 #### ABBA + STalign (LBA pipeline)
 1. **Export a registration image per section.** A lipid with anatomical contrast works best. The LBA used m/z 845.528, the feature whose image correlated best with the Allen density (Nissl-like) images. Save it as TIFF with the correct pixel size (25 µm).
@@ -1238,7 +1249,7 @@ The resulting diffeomorphism is applied to the pixel coordinates (not to the int
 
 ### 2-8 Lipid annotation
 <sub><a href="#top">(Back to top)</a></sub></br>
-MS1-only annotation is a hypothesis: an m/z value matches the theoretical m/z of a lipid ion within some ppm tolerance. Which ions to consider depends on matrix, additives, polarity and lipid class, so define the ion list explicitly for your data rather than using a generic one. Typical in positive mode with DHB are [M+H]+, [M+Na]+ and [M+K]+ ([M+NH4]+ mainly for neutral lipids and when an ammonium source is present); in negative mode [M-H]- and, depending on the matrix, [M+Cl]-. Ions such as [M+H-H2O]+ or [M-H2O-H]- are in-source fragments (dehydration) of specific classes, not ordinary adducts, and should be listed as such.
+After the previous steps, each feature is an m/z value. To interpret it biologically, it needs a name: the lipid (or lipids) whose ion has this m/z. Annotation proposes these names. MS1-only annotation is a hypothesis: an m/z value matches the theoretical m/z of a lipid ion within some ppm tolerance. Which ions to consider depends on matrix, additives, polarity and lipid class, so define the ion list explicitly for your data rather than using a generic one. Typical in positive mode with DHB are [M+H]+, [M+Na]+ and [M+K]+ ([M+NH4]+ mainly for neutral lipids and when an ammonium source is present); in negative mode [M-H]- and, depending on the matrix, [M+Cl]-. Ions such as [M+H-H2O]+ or [M-H2O-H]- are in-source fragments (dehydration) of specific classes, not ordinary adducts, and should be listed as such.
 
 In positive mode, several classes ionize poorly (PI, PG, PS, PA) and in-source fragments can mimic other classes. The best-known trap: glycerophospholipids such as PC, PE and PS can lose (part of) their headgroup in the source and give PA-like ions, whose exact formula depends on the precursor class and adduct and need not correspond to a PA of the same acyl composition; a PA-like signal can therefore be partly or entirely an in-source fragment. Enumerate the expected fragment formulas for the abundant precursors of your data and check whether they coincide with annotated peaks. In the LBA review, the referee showed that most "PA" peaks are likely PC fragments, and on-tissue MS/MS did not confirm the positive-mode PI and PG annotations.
 
@@ -1286,6 +1297,7 @@ ann = ds.results(database=("LipidMaps", "2017-12-12"), fdr=0.1)
 (Database names and versions change over time; `sm.databases()` lists the current ones.)
 
 #### Matching against your own reference list
+With a list of lipids expected in your samples (e.g. from LC-MS of the same tissue, or generated from class rules as in `scripts/lipid_reference.py`), annotation is a ppm comparison of each feature's m/z with the theoretical m/z of each lipid ion. It is transparent, needs no upload, and is the basis of the tolerance diagnostics below:
 ```python
 import numpy as np, pandas as pd
 
@@ -1358,7 +1370,7 @@ final_table = prep.prioritize_adducts_by_signal(path_data=uMAIA_path, acquisitio
 
 ### 2-9 Building the pixel-by-lipid matrix
 <sub><a href="#top">(Back to top)</a></sub></br>
-For analysis, flatten the normalized Zarr into a table with one row per pixel and one column per feature, plus metadata: acquisition, animal, sex, condition, section index along the rostrocaudal axis, pixel coordinates, CCF coordinates, Allen region, and a `BadSection` flag. In EUCLID this is:
+Analysis tools (scanpy, squidpy, EUCLID, statistical models) expect one table, with one row per observation, one column per feature and metadata for every row. The last preprocessing step builds it from the per-acquisition outputs. For analysis, flatten the normalized Zarr into a table with one row per pixel and one column per feature, plus metadata: acquisition, animal, sex, condition, section index along the rostrocaudal axis, pixel coordinates, CCF coordinates, Allen region, and a `BadSection` flag. In EUCLID this is:
 
 ```python
 from euclid_msi.preprocessing import Preprocessing
@@ -1413,10 +1425,9 @@ sd.SpatialData(labels=labels, tables={"table": table}).write("msi.zarr")
 ```
 Images (TIC, selected ion images, histology) are added the same way with `Image2DModel`, in the same coordinate system; a registered histology image gets the transformation from the registration.
 
->**NOTE**
->Distinguish four states of a missing value: *off-tissue* (removed by the mask), *not measured* (a feature not called or not matched in an acquisition), *measured but not retained* (no centroid above the instrument's threshold; a zero in a measured spectrum), and *truly absent*, which in a single pixel cannot be told apart from the previous one. Requantification (2-4) removes the not-measured state; the censoring diagnostic and censored copy (2-6) show how much the meaning of a zero differs between acquisitions. If you skip requantification, store a per-acquisition `measured` mask (or NaN for unmeasured blocks) and make detection fractions, pseudo-bulk means and normalization factors use only measured blocks: uMAIA's Zarr store, for example, simply has no array for an unmatched acquisition, which a naive loop turns into zeros.
->
->Keep **three versions** of the intensities in the object, and be explicit about which one each analysis uses: (i) the normalized measured values (`adata.X`, or a layer), (ii) values used only for clustering (e.g. batch-corrected reconstructions, `obsm`), and (iii) imputed values (a separate `obsm`/layer, with a flag per feature). Mixing them up is a common source of false conclusions in MSI analysis (see 3-4).
+**What a zero means, and which values to keep.** Distinguish four states of a missing value: *off-tissue* (removed by the mask), *not measured* (a feature not called or not matched in an acquisition), *measured but not retained* (no centroid above the instrument's threshold; a zero in a measured spectrum), and *truly absent*, which in a single pixel cannot be told apart from the previous one. Requantification (2-4) removes the not-measured state; the censoring diagnostic and censored copy (2-6) show how much the meaning of a zero differs between acquisitions. If you skip requantification, store a per-acquisition `measured` mask (or NaN for unmeasured blocks) and make detection fractions, pseudo-bulk means and normalization factors use only measured blocks: uMAIA's Zarr store, for example, simply has no array for an unmatched acquisition, which a naive loop turns into zeros.
+
+Keep **three versions** of the intensities in the object, and be explicit about which one each analysis uses: (i) the normalized measured values (`adata.X`, or a layer), (ii) values used only for clustering (e.g. batch-corrected reconstructions, `obsm`), and (iii) imputed values (a separate `obsm`/layer, with a flag per feature). Mixing them up is a common source of false conclusions in MSI analysis (see 3-4).
 
 ## Analysis of spatial lipidomics data
 <sub><a href="#top">(Back to top)</a></sub></br>
@@ -1456,6 +1467,8 @@ keep = (morans.mean(axis=1) > 0.4) & (dropouts < 4) & (score > 0)
 
 ### 3-2 Dimensionality reduction and data integration
 <sub><a href="#top">(Back to top)</a></sub></br>
+Each pixel has hundreds of feature values, many of them correlated (lipids of one class or one cell type co-vary) and noisy. Clustering and visualization work better on a few components that summarize this co-variation, which is what dimensionality reduction provides. When pixels come from many sections, slides or animals, technical differences between them also show up in these components, and pixels then group by section rather than by tissue type. Integration removes such differences from the embedding (not from the measured values).
+
 **NMF.** MSI intensities are non-negative, and lipids co-vary in groups (e.g. myelin lipids), so non-negative matrix factorization gives interpretable components ("lipid programs"). The LBA used a *seeded* NMF: build the absolute lipid-lipid correlation graph, run Leiden over resolutions 0.8-1.5 and pick the resolution maximizing `Q^0.7 * log(C + 1)` (Q modularity, C number of lipid communities; 16 in the LBA), initialize one factor per community with its most central lipid, fit NMF on the reference brain, and project all other brains with the fixed loadings.
 
 **Harmony.** The pixel-level NMF scores are then integrated across sections with Harmony. In the LBA, the batch variables were `SectionID`, `Sample`, `Sex` **and `Condition`**, i.e. the embedding used for clustering is deliberately stripped of sex and pregnancy differences. This is appropriate for defining one shared parcellation, and it is what enables label transfer; it would be inappropriate for any analysis that is supposed to detect condition effects.
@@ -1508,6 +1521,8 @@ else:
 
 ### 3-3 Clustering and spatial segmentation
 <sub><a href="#top">(Back to top)</a></sub></br>
+Clustering groups pixels with similar lipid profiles. In tissue, these groups usually form spatially coherent territories (the LBA's "lipizones"), which then serve as units to describe the tissue, to relate it to anatomy or cell types, and to compare conditions (3-5, 3-6).
+
 **Leiden on the integrated embedding** is the scRNA-seq-style default:
 ```python
 sc.pp.neighbors(adata, use_rep="X_harmony", n_neighbors=30)
@@ -1589,7 +1604,7 @@ Recommendations:
 
 ### 3-5 Characterizing lipid territories
 <sub><a href="#top">(Back to top)</a></sub></br>
-Once you have clusters, the typical characterization steps are:
+A cluster is only a label. To make it useful, describe what distinguishes it (marker lipids), where it is (anatomy), what it may consist of (cell types), and what its lipids suggest biologically. The typical steps are:
 
 **Marker lipids.** Mann-Whitney U tests of each cluster versus all others (or versus siblings in a hierarchy), with BH correction, on 0-1 scaled measured values; report the effect size (log2 fold change of means) and the fraction of pixels above background. Pixels are spatially autocorrelated and nested in sections and animals, so these p-values are not valid inference, and BH correction does not fix that. Use them, or better the effect sizes, only to rank candidate markers. To claim that a lipid is enriched in a cluster, aggregate per animal x cluster and test with the animal as unit, as in 3-6.
 
@@ -1748,7 +1763,7 @@ shift, baseline, foldchange = cc.summarize_case_control_results(
 
 ### 3-7 3D reconstruction and visualization
 <sub><a href="#top">(Back to top)</a></sub></br>
-With CCF coordinates, sections can be placed in 3D and gaps filled by interpolation. The LBA used a distance-weighted average (weights decaying exponentially with distance within a radius, restricted to voxels of the same Allen region, "anatomical interpolation"; check the distance unit and scale in the EUCLID code before changing them); MetaVision3D fills damaged regions with the average of neighbouring sections (MetaImpute3D) and creates intermediate sections by linear interpolation (MetaInterp3D). Interpolated volumes are for visualization, not for statistics.
+Serial sections sample an organ at intervals. To see lipid distributions in 3D, the sections are placed in one volume and the gaps between them are filled. With CCF coordinates, sections can be placed in 3D and gaps filled by interpolation. The LBA used a distance-weighted average (weights decaying exponentially with distance within a radius, restricted to voxels of the same Allen region, "anatomical interpolation"; check the distance unit and scale in the EUCLID code before changing them); MetaVision3D fills damaged regions with the average of neighbouring sections (MetaImpute3D) and creates intermediate sections by linear interpolation (MetaInterp3D). Interpolated volumes are for visualization, not for statistics.
 
 ```python
 postproc.anatomical_interpolation(["HexCer 40:0;O2"], output_dir="3d_interpolated")
