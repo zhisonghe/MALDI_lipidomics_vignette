@@ -1535,8 +1535,18 @@ The median of all candidate errors is only a rough estimate of the systematic of
 
 Normalize lipid names to the LIPID MAPS shorthand with [goslin](https://github.com/lifs-tools/pygoslin) (`from pygoslin.parser.Parser import LipidParser; LipidParser().parse("PC(16:0/18:1)").get_lipid_string()`), so that names from different sources can be compared. Use the sphingolipid hydroxyl notation (`SM 34:1;O2`), which matters for ceramides because [M+H]+ and [M-H2O+H]+ ions can be confused.
 
-In EUCLID, the same steps are wrapped as below (environment `msi-euclid`). `prep` is EUCLID's preprocessing object, created in 2-9 with `from euclid_msi.preprocessing import Preprocessing` and `prep = Preprocessing()`; `uMAIA_path` and `acquisitions` are defined there too:
+In EUCLID, the same steps are wrapped as below (environment `msi-euclid`). EUCLID annotates the features of its pixel table, so the table is built first (`store_exp_data_metadata`, see 2-9):
 ```python
+from euclid_msi.preprocessing import Preprocessing
+import pandas as pd
+
+uMAIA_path = "./uMAIA_subset"                       # normalized Zarr (without .zarr)
+acquisitions = pd.read_csv("acquisitionpaths.csv", index_col=0)   # columns: acqn, acqpath
+# acquisitions_metadata.csv: SectionID, Path, Sample, Sex, Condition, Section, BadSection
+
+prep = Preprocessing()
+prep.store_exp_data_metadata(path_data=uMAIA_path, acquisitions=acquisitions,
+                             metadata_csv="acquisitions_metadata.csv")   # builds prep.adata; exponentiates log values
 matched = prep.annotate_molecules(user_annotation_csv="lipids_processed.csv", ppm=5)
 prioritized = prep.abundance_prioritization_lcms(matched, lcms_csv="lcms_abundance.csv",
                                                  annotation_col="Lipid", threshold=0.8)
@@ -1558,21 +1568,13 @@ final_table = prep.prioritize_adducts_by_signal(path_data=uMAIA_path, acquisitio
 
 ### 2-9 Building the pixel-by-lipid matrix
 <sub><a href="#top">(Back to top)</a></sub></br>
-Analysis tools (scanpy, squidpy, EUCLID, statistical models) expect one table, with one row per observation, one column per feature and metadata for every row. The last preprocessing step builds it from the per-acquisition outputs. For analysis, flatten the normalized Zarr into a table with one row per pixel and one column per feature, plus metadata: acquisition, animal, sex, condition, section index along the rostrocaudal axis, pixel coordinates, CCF coordinates, Allen region, and a `BadSection` flag. In EUCLID this is:
+Analysis tools (scanpy, squidpy, EUCLID, statistical models) expect one table, with one row per observation, one column per feature and metadata for every row. The last preprocessing step builds it from the per-acquisition outputs. For analysis, flatten the normalized Zarr into a table with one row per pixel and one column per feature, plus metadata: acquisition, animal, sex, condition, section index along the rostrocaudal axis, pixel coordinates, CCF coordinates, Allen region, and a `BadSection` flag. In EUCLID, the table itself was built in 2-8 (`store_exp_data_metadata`), because the annotation needs it; the remaining steps are:
 
 ```python
-from euclid_msi.preprocessing import Preprocessing
-import pandas as pd
-
-uMAIA_path = "./uMAIA_subset"                       # normalized Zarr (without .zarr)
-acquisitions = pd.read_csv("acquisitionpaths.csv", index_col=0)   # columns: acqn, acqpath
-# acquisitions_metadata.csv: SectionID, Path, Sample, Sex, Condition, Section, BadSection
-
-prep = Preprocessing()
+# prep (the EUCLID Preprocessing object), uMAIA_path and acquisitions: created in 2-8, where
+# prep.store_exp_data_metadata(...) built the pixel table prep.adata from the normalized Zarr
 morans_df = prep.calculate_moran(path_data=uMAIA_path, acquisitions=acquisitions,
                                  log_file="iterations_log.txt", morans_csv="morans_by_sec.csv")
-prep.store_exp_data_metadata(path_data=uMAIA_path, acquisitions=acquisitions,
-                             metadata_csv="acquisitions_metadata.csv")   # exponentiates log values
 prep.add_barcodes_to_adata()
 prep.add_metadata_from_parquet("pixel_metadata.parquet")     # columns x, y, Path + e.g. CCF coords, acronym
 prep.filter_by_metadata("allencolor", "!='#000000'")         # drop pixels outside the atlas brain
@@ -1628,9 +1630,10 @@ As with highly variable genes in scRNA-seq, clustering works better on a subset 
 * the mean Moran's I (> 0.4 required),
 * the number of sections in which the feature drops out (section mean < 1.5e-4; fewer than 4 dropouts allowed),
 
-then clustered features in this score space with k-means (k = 10), inspected the images of each cluster and discarded 5 of the 10 clusters as "visibly corrupted", and finally removed another 33 features by hand ("peaks that break the NMF", roughly equivalent to raising the Moran's I threshold to 0.5). About 105 features remained for clustering. In EUCLID (environment `msi-euclid`), continuing with the objects of 2-8 and 2-9: `prep` is the `Preprocessing` object created in 2-9 (`from euclid_msi.preprocessing import Preprocessing`, `prep = Preprocessing()`), `morans_df` is the output of `prep.calculate_moran` there, and `final_table` is the annotation table of 2-8:
+then clustered features in this score space with k-means (k = 10), inspected the images of each cluster and discarded 5 of the 10 clusters as "visibly corrupted", and finally removed another 33 features by hand ("peaks that break the NMF", roughly equivalent to raising the Moran's I threshold to 0.5). About 105 features remained for clustering. In EUCLID:
 
 ```python
+# prep (the EUCLID Preprocessing object) and final_table: created in 2-8; morans_df: prep.calculate_moran in 2-9
 prep.min0max1_normalize_clip()            # per-lipid 0-1 scaling for comparability
 prep.feature_selection(morans_df, modality="combined", moran_threshold=0.25,
                        cluster_k=10, output_csv="feature_scores.csv",
