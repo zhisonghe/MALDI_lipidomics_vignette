@@ -23,6 +23,7 @@ dependencies:
   - zarr
   - anndata
   - scanpy
+  - pynndescent<0.7      # 0.7.0 breaks sc.pp.neighbors of scanpy 1.12.4 (tutorial 1-4, "Version-sensitive calls")
   - squidpy
   - leidenalg
   - python-igraph
