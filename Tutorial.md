@@ -905,7 +905,7 @@ intervals = consensus_intervals(matches, acquisitions)
 adatas = {a: requantify(f"rawData/{a}/{a}.imzml", intervals[intervals.acq == a]) for a in acquisitions}
 ```
 
-The result contains raw (not TIC-divided) intensities, which feed the pixel-level normalization of 2-6; `var["called"]` keeps track of where a feature was originally called, and `obsm["low_centroid"]` holds a diagnostic of how low the retained centroids go in each m/z window of each pixel (used in 2-6). The same functions are in `scripts/gapfill.py`. The summation itself exists in the common tools: within uMAIA, call `save_images(smz, df=..., normalization=None)` (2-3) with each acquisition's rows of `intervals`; in Cardinal, `peakPick(ref=...)` or `peakProcess(ref=...)` extract given m/z values from every spectrum. `requantify()` is kept here because it also records the full-spectrum TIC and the low-centroid diagnostic of 2-6, which neither of them provides.
+The result contains raw (not TIC-divided) intensities, which feed the pixel-level normalization of 2-6; `var["called"]` keeps track of where a feature was originally called, and `obsm["low_centroid"]` holds a diagnostic of how low the retained centroids go in each m/z window of each pixel (used in 2-6). The same functions are in `scripts/gapfill.py`. The summation itself exists in the common tools: within uMAIA, call `save_images(smz, df=..., normalization=None)` (2-3) with each acquisition's rows of `intervals`; in Cardinal, `peakPick(ref=...)` or `peakProcess(ref=...)` extract given m/z values from every spectrum. `requantify()` is kept here because it also records the full-spectrum TIC and the low-centroid diagnostic of 2-6, which neither of them provides. Before the feature QC of 2-5, the tables of all acquisitions are combined into one (2-9).
 
 Requantification cannot recover signal that the instrument did not centroid: values below the centroiding threshold remain zero (see 2-6). A requantified value where the feature was not called is signal in the expected window, not a confirmed peak; inspect a few such images and spectra, especially where intervals of neighbouring features were cut.
 
@@ -1568,7 +1568,75 @@ final_table = prep.prioritize_adducts_by_signal(path_data=uMAIA_path, acquisitio
 
 ### 2-9 Building the pixel-by-lipid matrix
 <sub><a href="#top">(Back to top)</a></sub></br>
-Analysis tools (scanpy, squidpy, EUCLID, statistical models) expect one table, with one row per observation, one column per feature and metadata for every row. The last preprocessing step builds it from the per-acquisition outputs. For analysis, flatten the normalized Zarr into a table with one row per pixel and one column per feature, plus metadata: acquisition, animal, sex, condition, section index along the rostrocaudal axis, pixel coordinates, CCF coordinates, Allen region, and a `BadSection` flag. In EUCLID, the table itself was built in 2-8 (`store_exp_data_metadata`), because the annotation needs it; the remaining steps are:
+Analysis tools (scanpy, squidpy, statistical models) expect one table, with one row per observation, one column per feature and metadata for every row. Requantification (2-4) gives one table per acquisition, all with the same features. They have to become one table with pixels as observations, metadata for every pixel, and every version of the values that later steps use. Store it as AnnData (`.h5ad`): all scanpy and squidpy tools then apply directly.
+
+What goes where:
+* `obs`, one row per pixel: the acquisition and its sample-level metadata (sample or animal, sex, condition, slide, run, section index for serial sections), the pixel coordinates, the tissue mask (2-2) and the tissue piece or region label, and, after registration (2-7), atlas or histology coordinates and regions;
+* `var`, one row per feature: the m/z, the matching and requantification details (2-4), the QC metrics and filter flags (2-5) and the annotation (2-8). Values that differ between acquisitions (interval bounds, whether the feature was called) get one column per acquisition;
+* `X` and `layers`: the raw summed intensities and the normalized values (2-6); see the end of this section for which versions to keep;
+* `obsm`: the pixel coordinates (`spatial`), and later embeddings;
+* `uns`: the parameters and software versions used, so that the table records how it was made.
+
+#### Combining the acquisitions
+The acquisitions are combined right after requantification, because the feature QC (2-5) and the normalization (2-6) compare samples. Keep all pixels until the tissue-enrichment filter of 2-5 has compared tissue with off-tissue pixels; after that, keep the tissue pixels only.
+
+```python
+import numpy as np, pandas as pd, anndata as ad
+
+# adatas: {acquisition: AnnData of all pixels x features}, from requantify() (2-4); all have the same features
+# masks: {acquisition: tissue mask, boolean raster with rows = y and columns = x} (2-2)
+# meta: DataFrame indexed by acquisition with sample-level metadata, e.g. "sample", "condition", "slide", "run"
+parts = []
+for a, A in adatas.items():
+    A = A.copy()
+    x, y = A.obsm["spatial"][:, 0], A.obsm["spatial"][:, 1]          # imzML coordinates, 1-based
+    A.obs["x"], A.obs["y"] = x, y
+    A.obs["tissue"] = masks[a][y - 1, x - 1]
+    for col in meta.columns:
+        A.obs[col] = meta.loc[a, col]
+    parts.append(A)
+
+# feature columns that are the same in every acquisition are kept once, the others once per acquisition
+shared = [c for c in ("mz", "window", "chain", "split") if c in parts[0].var]
+per_acq = [A.var.drop(columns=shared).add_suffix(f"_{a}") for a, A in zip(adatas, parts)]
+adata = ad.concat(parts, join="inner", merge=None)                  # pixel names are unique: "<acquisition>:px<i>"
+adata.var = parts[0].var[shared].join(pd.concat(per_acq, axis=1)).loc[adata.var_names]
+adata.uns["windows"] = parts[0].uns["windows"]
+for col in ["acq", *meta.columns]:
+    adata.obs[col] = adata.obs[col].astype("category")
+
+# ... feature QC (2-5), with the tissue-enrichment filter on all pixels ...
+adata = adata[adata.obs["tissue"].to_numpy()].copy()
+```
+
+The off-tissue pixels remain in the per-acquisition tables. Keep those: they are needed later to check whether an ion, or a cluster at the tissue edge, is background (3-3).
+
+#### Completing the table
+After normalization (2-6) and annotation (2-8), add pixel-level information from other sources, and record how the table was made:
+
+```python
+import datetime, importlib.metadata as md
+
+# pixel_meta: one row per pixel, with columns acq, x, y and e.g. atlas coordinates and region (2-7)
+key = ["acq", "x", "y"]
+extra = adata.obs[key].merge(pixel_meta, on=key, how="left", validate="one_to_one")
+extra.index = adata.obs_names
+adata.obs = adata.obs.join(extra.drop(columns=key))
+
+adata.obsm["spatial"] = adata.obs[["x", "y"]].to_numpy(float)
+adata.uns["provenance"] = {
+    "date": datetime.date.today().isoformat(),
+    "packages": {p: md.version(p) for p in ["anndata", "numpy", "scipy", "scanpy", "pyimzML"]},
+    "layers": {"X": "TIC over the curated features (2-6)", "raw": "summed intensities (2-4)"},
+    "parameters": {"matching_ppm": 2.0, "detection": 0.05, "annotation_ppm": 1.0},   # the values you used
+}
+adata.write_h5ad("msi_preprocessed.h5ad", compression="gzip")
+```
+
+Write down the meaning of every layer as above: once the table is shared, the layer names are all that is left of the processing.
+
+#### With EUCLID (LBA pipeline)
+The LBA works from uMAIA's normalized Zarr store (2-6) instead of per-acquisition tables. Its table has one row per pixel and the metadata acquisition, animal, sex, condition, section index along the rostrocaudal axis, pixel coordinates, CCF coordinates, Allen region and a `BadSection` flag. EUCLID builds the table from the Zarr store; it was built in 2-8 (`store_exp_data_metadata`), because the annotation needs it. The remaining steps are:
 
 ```python
 # prep (the EUCLID Preprocessing object), uMAIA_path and acquisitions: created in 2-8, where
@@ -1581,7 +1649,7 @@ prep.filter_by_metadata("allencolor", "!='#000000'")         # drop pixels outsi
 prep.adata
 ```
 
-Without EUCLID, the equivalent in plain Python (as in the LBA `003-DataPreparation` notebook) is a loop over features and sections that stacks the masked pixels, exponentiates, removes background pixels (all features below ~1e-4) and joins the CCF coordinates. Store the result as AnnData (`.h5ad`) with pixels as observations: all scanpy/squidpy tools then apply directly.
+Without EUCLID, the same in plain Python (as in the LBA `003-DataPreparation` notebook) is a loop over features and sections that stacks the masked pixels of the Zarr store, exponentiates, removes background pixels (all features below ~1e-4) and joins the CCF coordinates.
 
 #### AnnData or SpatialData?
 For the analysis itself, keep an AnnData with pixels as observations: scanpy, squidpy, harmonypy, NMF, EUCLID and the pseudo-bulk statistics of 3-6 all work on it. [SpatialData](https://spatialdata.scverse.org) is a container around such tables. It stores images (ion images, H&E, immunofluorescence), labels (masks, segmentations), shapes (regions of interest) and AnnData tables together, each with its own coordinate system and the transformations between them, in one Zarr store that can be read lazily. It pays off when:
