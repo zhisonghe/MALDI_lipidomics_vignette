@@ -638,28 +638,145 @@ The resulting Zarr store has one group per matched feature, named by its mean m/
 >* `MAX_DIST` is in Da, not ppm: 0.005 Da is 12.5 ppm at m/z 400, ~6 ppm at m/z 800 and ~4 ppm at m/z 1,200. Choose it from the spread of residual mass errors after recalibration (2-2) at the high end of your m/z range, not from the median mass error alone; peak width and unresolved interferences also widen the spread.
 >* All acquisitions that are matched together also define the "universe" for normalization (2-6). The LBA matched and normalized 138 acquisitions together, including 13 sections from two other projects (GBA1 and CERT1 mouse brains) that are not part of the paper (see Appendix A).
 
+#### ppm clustering of peak centres
+With up to a few dozen acquisitions and good mass accuracy (measured in 2-2), matching is a one-dimensional problem: peaks of the same ion have nearly the same m/z in every acquisition. It needs no integer program and no Gurobi license. In R, `MALDIquant::binPeaks()` and Cardinal's `peakAlign()` group peaks this way; Python has no commonly used function for it, so the code is given below.
+
+The simplest version pools the peak centres (`mz_estimated`) of all acquisitions, sorts them, and starts a new feature wherever two neighbouring centres are more than a tolerance apart (single-linkage clustering). Its weakness is chaining, and it grows with the number of acquisitions. Ions a few ppm apart are common in lipid MSI: in positive mode, PC 38:6 [M+H]+ (806.5694) and PC 36:3 [M+Na]+ (806.5670) are 3.0 ppm apart (2-2). The centres of one ion scatter by up to about 1 ppm between acquisitions. With many acquisitions in the pool, the gap between two such ions fills with centres that are less than the tolerance apart, and both ions end up in one feature. A feature that contains two peaks of the same acquisition shows that this happened, because that acquisition resolved two ions.
+
+Lowering the tolerance does not solve this. Once it is below the scatter of one ion, ions are split into several features, which you see as a steep rise in the number of features as the tolerance is lowered. Instead, keep the tolerance above the scatter and use what the acquisitions tell you: two peaks of one acquisition in a chain mean that a feature boundary lies between them. The code below
+1. merges peaks of one acquisition that are closer than `merge_ppm` (default 1 ppm). Closer than the scatter of one ion, they are one peak split by the peak calling, not two ions;
+2. corrects the centres by each acquisition's calibration offset (from a first matching), so that a constant shift does not mix up the order of peaks of different ions. uMAIA's centres lie on its `mz_resolution` grid (1e-4 Da, 0.1-0.2 ppm at m/z 500-1,000), so smaller offsets are not seen;
+3. forms chains by single-linkage clustering at `ppm`;
+4. splits each chain that contains two peaks of one acquisition, or is wider than `max_span_ppm`, into consecutive groups. Each group has at most one peak per acquisition and spans at most `max_span_ppm`. Among the valid splits, it takes the one with the fewest groups, and among those the one with the tightest groups (smallest within-group sum of squares). For peaks sorted along one axis, dynamic programming finds this split exactly.
+
+For example, if acquisition A has peaks at 0 and 3.3 ppm and acquisition B at 0.8 and 3.6 ppm, A requires a boundary between 0 and 3.3 and B one between 0.8 and 3.6. One boundary between 0.8 and 3.3 satisfies both, so the chain becomes two features. Acquisitions whose required ranges do not overlap point to more than two ions and get more boundaries.
+
+```python
+import numpy as np, pandas as pd
+
+
+def pool(df_list, acquisitions):
+    """One row per peak: acq, mz_estimated, min, max, num_pixels."""
+    cols = ["mz_estimated", "min", "max", "num_pixels"]
+    return pd.concat([d[cols].assign(acq=a) for d, a in zip(df_list, acquisitions)], ignore_index=True)
+
+
+def chains(mz, ppm):
+    """Single-linkage clusters of sorted m/z values: a new cluster wherever neighbours are > ppm apart."""
+    gap = np.diff(mz) / mz[1:] * 1e6
+    return np.concatenate([[0], np.cumsum(gap > ppm)])
+
+
+def merge_close(pk, merge_ppm):
+    """Merge peaks of the same acquisition closer than merge_ppm (chains of them, too)."""
+    pk = pk.sort_values(["acq", "mz_estimated"]).reset_index(drop=True)
+    new = np.ones(len(pk), bool)
+    same = (pk.acq.values[1:] == pk.acq.values[:-1])
+    close = np.diff(pk.mz_estimated.values) / pk.mz_estimated.values[1:] * 1e6 < merge_ppm
+    new[1:] = ~(same & close)
+    pk["g"] = np.cumsum(new)
+    w = pk.num_pixels.clip(lower=1)
+    pk["wmz"] = pk.mz_estimated * w
+    m = pk.assign(w=w).groupby("g").agg(acq=("acq", "first"), min=("min", "min"), max=("max", "max"),
+                                        wmz=("wmz", "sum"), w=("w", "sum"), num_pixels=("num_pixels", "max"),
+                                        n=("acq", "size"))
+    m["mz_estimated"] = m.wmz / m.w
+    return m[["acq", "mz_estimated", "min", "max", "num_pixels"]].reset_index(drop=True), int((m.n > 1).sum())
+
+
+def calibration_offsets(pk, ppm):
+    """Median deviation (ppm) of each acquisition from the centres of unambiguous features of a first matching."""
+    s = pk.sort_values("mz_estimated")
+    f = pd.Series(chains(s.mz_estimated.values, ppm), index=s.index)
+    s = s.assign(f=f)
+    ok = s.groupby("f").acq.transform(lambda a: not a.duplicated().any() and a.size > 1)
+    s = s[ok.astype(bool)]
+    dev = (s.mz_estimated / s.groupby("f").mz_estimated.transform("median") - 1) * 1e6
+    return dev.groupby(s.acq).median()
+
+
+def segment(u, acq, max_span):
+    """Split sorted positions u (ppm) into consecutive groups with at most one peak per acquisition and a span of
+    at most max_span: fewest groups, then smallest within-group sum of squares. Returns a group label per peak."""
+    n = len(u)
+    codes = pd.factorize(np.asarray(acq))[0]
+    lo = np.empty(n, int)                       # u[lo[j]..j] is the longest valid group ending at j
+    last, start = {}, 0
+    for j in range(n):
+        c = codes[j]
+        if last.get(c, -1) >= start:
+            start = last[c] + 1
+        last[c] = j
+        while u[j] - u[start] > max_span:
+            start += 1
+        lo[j] = start
+    s1 = np.concatenate([[0.0], np.cumsum(u)])
+    s2 = np.concatenate([[0.0], np.cumsum(u * u)])
+    best = [(0, 0.0)] + [None] * n               # best[j]: (groups, sum of squares) of the first j peaks
+    prev = [0] * (n + 1)
+    for j in range(1, n + 1):
+        for i in range(lo[j - 1], j):           # last group = peaks i..j-1
+            m, t = j - i, s1[j] - s1[i]
+            cand = (best[i][0] + 1, best[i][1] + (s2[j] - s2[i]) - t * t / m)
+            if best[j] is None or cand < best[j]:
+                best[j], prev[j] = cand, i
+    lab, j, k = np.empty(n, int), n, best[n][0]
+    while j > 0:
+        k -= 1
+        lab[prev[j]:j] = k
+        j = prev[j]
+    return lab
+
+
+def match(df_list, acquisitions, ppm, merge_ppm=1.0, max_span_ppm=4.0, split=True):
+    """Match peaks across acquisitions. split=False: no merging or splitting; a chain with two peaks of one
+    acquisition keeps the one detected in most pixels (the earlier behaviour).
+    Returns the peaks (columns acq, mz_estimated, min, max, num_pixels, mz_corr, chain, feature, split; at most
+    one peak per feature and acquisition), the calibration offsets (ppm, per acquisition) and a dict of counts."""
+    pk = pool(df_list, acquisitions)
+    n_peaks = len(pk)
+    pk, n_merged = merge_close(pk, merge_ppm) if split else (pk, 0)
+    off = calibration_offsets(pk, ppm)
+    pk["mz_corr"] = pk.mz_estimated * (1 - pk.acq.map(off).fillna(0).values * 1e-6)
+    pk = pk.sort_values("mz_corr").reset_index(drop=True)
+    pk["chain"] = chains(pk.mz_corr.values, ppm)
+    g = pk.groupby("chain")
+    dup = g.acq.transform(lambda a: a.duplicated().any()).astype(bool)
+    span = g.mz_corr.transform(lambda m: (m.max() - m.min()) / m.mean() * 1e6)
+    stats = {"peaks": n_peaks, "merged_close_peaks": n_merged, "chains": int(pk.chain.nunique()),
+             "chains_with_two_peaks_of_one_acquisition": int(pk.chain[dup].nunique()),
+             "chains_wider_than_max_span": int(pk.chain[span > max_span_ppm].nunique())}
+    pk["group"] = 0
+    if split:
+        todo = dup | (span > max_span_ppm)
+        for c, s in pk[todo].groupby("chain"):
+            u = (s.mz_corr.values / s.mz_corr.values[0] - 1) * 1e6
+            pk.loc[s.index, "group"] = segment(u, s.acq.values, max_span_ppm)
+    else:                                       # keep the peak detected in most pixels
+        pk = pk.sort_values("num_pixels", ascending=False).drop_duplicates(["chain", "acq"]).sort_values("mz_corr")
+    pk["feature"] = pk.groupby(["chain", "group"], sort=True).ngroup()
+    pk["split"] = pk.groupby("chain").feature.transform("nunique") > 1
+    stats.update(features=int(pk.feature.nunique()), chains_split=int(pk.chain[pk.split].nunique()),
+                 features_from_split_chains=int(pk.feature[pk.split].nunique()))
+    return pk.drop(columns="group").reset_index(drop=True), off, stats
+
+df_list = [pd.read_csv(f, index_col=0) for f in ranges_files]        # uMAIA ranges.csv of each acquisition (2-3)
+df_list = [d[(d.num_pixels > 100) & d.mz_estimated.notna()] for d in df_list]
+pk, offsets, stats = match(df_list, acquisitions, ppm=2, merge_ppm=1, max_span_ppm=4)
+print(stats)
+```
+
+`pk` has one row per peak, with its feature and `chain`: features that come from one split chain share the chain number and have `split = True`. `stats` counts the chains before splitting (with two peaks of one acquisition, wider than `max_span_ppm`) and the features after. The same code is in `scripts/matching.py`.
+
+>**NOTE**
+>* **Choosing `ppm`.** Run the matching at several tolerances (for example 0.5, 1, 1.5, 2 and 3 ppm) and look at the number of chains and of chains with two peaks of one acquisition. A steep rise in the number of chains as the tolerance is lowered shows that ions are being split: choose a tolerance above that point. The spread of the calibration offsets between acquisitions (2-2) is a lower limit, but the centres of one ion usually scatter more than the offsets differ.
+>* **Choosing `merge_ppm`.** At your tolerance, look at how far apart the two peaks of one acquisition in a chain are. Distances well below 1 ppm are peaks split by the peak calling; distances of 2-5 ppm are distinct ions, such as the [M+H]+/[M+Na]+ pairs above. Set `merge_ppm` between the two.
+>* **`max_span_ppm`** (about twice `ppm`) splits chains that grew wide without containing two peaks of one acquisition. If it is too small, it cuts one ion whose centres scatter widely; such a feature then appears as two features that are each missing in some acquisitions.
+>* **Checking the result.** Two features from one split chain should be distinct ions with different spatial distributions. Compare their images after requantification (below) in an acquisition where both were called, but not pixel by pixel: ions a few ppm apart usually give one centroid per pixel spectrum, so the two raw images are nearly mutually exclusive whether they hold one ion or two. Smooth both images (e.g. a Gaussian with a sigma of 2 pixels) and correlate them. Compare that correlation with the one you get if the pair were one ion cut in two: add the two images, give each pixel's signal at random to one of the two features in the observed proportion, smooth and correlate. A pair whose correlation is close to that value is a candidate for one ion. For small features both correlations are low and the test cannot tell. Where an acquisition did not resolve the two ions, its single peak covers both. Requantification then cuts that interval between the two feature centres, so the values of both features in that acquisition are mixtures. This is a limit of resolving power (2-8), not of the matching; the `split` column marks the features concerned.
+>* The splitting assumes that peaks of two neighbouring ions do not cross in m/z between acquisitions, i.e. that the distance between the ions is larger than the scatter of each. For hundreds of acquisitions, or worse mass accuracy, use uMAIA or Cardinal.
+
 #### Alternatives
 * **Cardinal**: read all sections into one `MSImagingArrays` (`readMSIData` on each file, then `combine()`), run `peakProcess()` on the combined object so that reference peaks are estimated jointly, or `peakAlign()` with a common tolerance.
-* **ppm clustering of peak centres**: with a handful of acquisitions and good mass accuracy (measured in 2-2), matching is a simple one-dimensional problem and does not need an integer program or a Gurobi license. In R, `MALDIquant::binPeaks()` and Cardinal's `peakAlign()` do this grouping; Python has no commonly used function for it, so here it is in a few lines. Pool the peak centres of all acquisitions, sort them, and start a new feature wherever two neighbouring centres are more than a tolerance apart:
-  ```python
-  import numpy as np, pandas as pd
-
-  def match_ppm(df_list, acquisitions, ppm=3):
-      """df_list: per-acquisition ranges.csv tables (column mz_estimated)."""
-      pk = pd.concat([d.assign(acq=a)[["mz_estimated", "min", "max", "acq"]]
-                      for d, a in zip(df_list, acquisitions)])
-      pk = pk.sort_values("mz_estimated").reset_index(drop=True)
-      gap = np.diff(pk.mz_estimated.values) / pk.mz_estimated.values[1:] * 1e6
-      pk["feature"] = np.concatenate([[0], np.cumsum(gap > ppm)])
-      # a feature must not contain two peaks of the same acquisition
-      n_dup = pk.groupby("feature").acq.apply(lambda a: a.duplicated().any()).sum()
-      # single linkage can chain: report features wider than twice the tolerance
-      span = pk.groupby("feature").mz_estimated.agg(lambda m: (m.max() - m.min()) / m.mean() * 1e6)
-      print(pk.feature.nunique(), "features;", n_dup, "contain >1 peak of one acquisition;",
-            (span > 2 * ppm).sum(), "span more than", 2 * ppm, "ppm")
-      return pk
-  ```
-  This is single-linkage clustering, so chains of peaks can merge when many acquisitions are pooled or the tolerance is too wide. The number of features containing two peaks of the same acquisition tells you when this happens: lower the tolerance until it is (almost) zero, and inspect features whose span exceeds twice the tolerance. Complete-linkage clustering with a maximal span, or assignment of peaks to reference m/z values with at most one peak per acquisition, avoids chaining altogether. For dozens of acquisitions or worse mass accuracy, use uMAIA or Cardinal.
 * **Reference-list approach**: define the feature list externally (for example, all [M+H]+, [M+Na]+, [M+K]+ ions of lipids detected by LC-MS/MS in the same tissue, within 5 ppm) and extract exactly these intervals in every section. It needs no solver and makes features identical by construction, at the cost of missing unexpected molecules. For lipidomics of a well-characterized tissue it is a reasonable choice.
 
 #### Requantifying every feature in every acquisition (gap filling)
@@ -767,7 +884,8 @@ def requantify(imzml, intervals, window_da=25.0, q=0.05, ibd=None):
                           shape=(n, len(iv)), dtype=np.float32)
     else:
         X = sp.csr_matrix((n, len(iv)), dtype=np.float32)
-    var = iv.assign(feature=iv.feature.astype(str)).set_index("feature")[["mz", "min", "max", "called"]]
+    extra = [c for c in ("chain", "split") if c in iv]                  # from match() (scripts/matching.py), if present
+    var = iv.assign(feature=iv.feature.astype(str)).set_index("feature")[["mz", "min", "max", "called"] + extra]
     var["window"] = ((var["mz"] - mz0) // window_da).astype(int).clip(0, nwin - 1)
     A = ad.AnnData(X, var=var)
     A.obs_names = [f"{acq}:px{i}" for i in range(n)]
@@ -781,7 +899,7 @@ def requantify(imzml, intervals, window_da=25.0, q=0.05, ibd=None):
 # from uMAIA matching: one row per molecule and section in which it was called
 matches = df_match.rename(columns={"molecule_ID": "feature"}).assign(
     acq=lambda d: [acquisitions[int(i)] for i in d["section_ix"]])
-# (from match_ppm above: matches = pk[["feature", "acq", "min", "max", "mz_estimated"]])
+# (from match above: matches = pk[["feature", "acq", "min", "max", "mz_estimated"]])
 intervals = consensus_intervals(matches, acquisitions)
 adatas = {a: requantify(f"rawData/{a}/{a}.imzml", intervals[intervals.acq == a]) for a in acquisitions}
 ```

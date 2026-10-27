@@ -96,7 +96,8 @@ def requantify(imzml, intervals, window_da=25.0, q=0.05, ibd=None):
                           shape=(n, len(iv)), dtype=np.float32)
     else:
         X = sp.csr_matrix((n, len(iv)), dtype=np.float32)
-    var = iv.assign(feature=iv.feature.astype(str)).set_index("feature")[["mz", "min", "max", "called"]]
+    extra = [c for c in ("chain", "split") if c in iv]                  # from match() (scripts/matching.py), if present
+    var = iv.assign(feature=iv.feature.astype(str)).set_index("feature")[["mz", "min", "max", "called"] + extra]
     var["window"] = ((var["mz"] - mz0) // window_da).astype(int).clip(0, nwin - 1)
     A = ad.AnnData(X, var=var)
     A.obs_names = [f"{acq}:px{i}" for i in range(n)]
