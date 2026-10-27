@@ -1535,7 +1535,7 @@ The median of all candidate errors is only a rough estimate of the systematic of
 
 Normalize lipid names to the LIPID MAPS shorthand with [goslin](https://github.com/lifs-tools/pygoslin) (`from pygoslin.parser.Parser import LipidParser; LipidParser().parse("PC(16:0/18:1)").get_lipid_string()`), so that names from different sources can be compared. Use the sphingolipid hydroxyl notation (`SM 34:1;O2`), which matters for ceramides because [M+H]+ and [M-H2O+H]+ ions can be confused.
 
-In EUCLID, the same steps are wrapped as (environment `msi-euclid`, see 2-9 for `prep`):
+In EUCLID, the same steps are wrapped as below (environment `msi-euclid`). `prep` is EUCLID's preprocessing object, created in 2-9 with `from euclid_msi.preprocessing import Preprocessing` and `prep = Preprocessing()`; `uMAIA_path` and `acquisitions` are defined there too:
 ```python
 matched = prep.annotate_molecules(user_annotation_csv="lipids_processed.csv", ppm=5)
 prioritized = prep.abundance_prioritization_lcms(matched, lcms_csv="lcms_abundance.csv",
@@ -1628,7 +1628,7 @@ As with highly variable genes in scRNA-seq, clustering works better on a subset 
 * the mean Moran's I (> 0.4 required),
 * the number of sections in which the feature drops out (section mean < 1.5e-4; fewer than 4 dropouts allowed),
 
-then clustered features in this score space with k-means (k = 10), inspected the images of each cluster and discarded 5 of the 10 clusters as "visibly corrupted", and finally removed another 33 features by hand ("peaks that break the NMF", roughly equivalent to raising the Moran's I threshold to 0.5). About 105 features remained for clustering. In EUCLID:
+then clustered features in this score space with k-means (k = 10), inspected the images of each cluster and discarded 5 of the 10 clusters as "visibly corrupted", and finally removed another 33 features by hand ("peaks that break the NMF", roughly equivalent to raising the Moran's I threshold to 0.5). About 105 features remained for clustering. In EUCLID (environment `msi-euclid`), continuing with the objects of 2-8 and 2-9: `prep` is the `Preprocessing` object created in 2-9 (`from euclid_msi.preprocessing import Preprocessing`, `prep = Preprocessing()`), `morans_df` is the output of `prep.calculate_moran` there, and `final_table` is the annotation table of 2-8:
 
 ```python
 prep.min0max1_normalize_clip()            # per-lipid 0-1 scaling for comparability
