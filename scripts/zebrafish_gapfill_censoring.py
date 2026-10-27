@@ -2,7 +2,7 @@
 
 Usage: python zebrafish_gapfill_censoring.py <folder with the .imzml/.IBD files>
 Same preprocessing as the figures (example_data.py): reference-ion tissue masks (2-2), stand-in peak calling
-(features in >= 5% of the tissue pixels), ppm matching at 3 ppm and requantification (2-4).
+(features in >= 5% of the tissue pixels), ppm clustering at 3 ppm with splitting of chains and requantification (2-4).
 """
 import sys, re, glob, os, numpy as np, pandas as pd, warnings
 warnings.filterwarnings("ignore")

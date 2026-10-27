@@ -1,8 +1,8 @@
 """Preprocessing of the example data for the tutorial figures (make_figures.py, make_analysis_figures.py).
 
 Tissue masks as in 2-2 (Otsu on the smoothed summed image of a few abundant tissue ions), a simple frequency-based stand-in for uMAIA peak
-calling (features found in >= 5% of the tissue pixels of an acquisition), ppm matching at 3 ppm (2-4) and
-requantification of every feature in every acquisition (2-4). Runs on a laptop without the msi-umaia environment.
+calling (features found in >= 5% of the tissue pixels of an acquisition), ppm clustering at 3 ppm with splitting of
+chains (matching.py, 2-4) and requantification of every feature in every acquisition (2-4). Runs on a laptop without the msi-umaia environment.
 """
 import os, sys
 import numpy as np, pandas as pd
@@ -13,6 +13,7 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gapfill import consensus_intervals, requantify
+from matching import match
 
 
 # abundant tissue lipids in positive mode with DHB (the reference ions of 2-2): PC 34:1 [M+H]+, [M+Na]+, [M+K]+,
@@ -62,19 +63,18 @@ def call_peaks(p, mask, min_frac=0.05):
     pk, _ = find_peaks(sm, distance=4); pk = pk[tot[pk] >= min_frac * len(idx)]
     c = np.exp(L0 + (pk + 0.5) * BIN); lo, hi = c * (1 - 2.5e-6), c * (1 + 2.5e-6)
     mid = (hi[:-1] + lo[1:]) / 2; ov = hi[:-1] > lo[1:]; hi[:-1][ov], lo[1:][ov] = mid[ov], mid[ov]
-    return pd.DataFrame({"mz_estimated": c, "min": lo, "max": hi})
+    return pd.DataFrame({"mz_estimated": c, "min": lo, "max": hi, "num_pixels": tot[pk]})
 
 
-def requantified(files, masks, ppm=3.0):
+def requantified(files, masks, ppm=3.0, merge_ppm=1.0, max_span_ppm=6.0):
     """files: {acquisition: (imzml, ibd)}; masks: {acquisition: boolean raster}. Returns {acquisition: AnnData of the
     tissue pixels x matched features, raw summed intensities}, all with the same features."""
     acqs = list(files)
     P = {a: ImzMLParser(files[a][0], ibd_file=open(files[a][1], "rb")) for a in acqs}
     dfl = [call_peaks(P[a], masks[a]) for a in acqs]
-    pk = pd.concat([d.assign(acq=a) for d, a in zip(dfl, acqs)]).sort_values("mz_estimated").reset_index(drop=True)
-    gap = np.diff(pk.mz_estimated.values) / pk.mz_estimated.values[1:] * 1e6
-    pk["feature"] = np.concatenate([[0], np.cumsum(gap > ppm)])
-    pk = pk.drop_duplicates(["feature", "acq"])
+    pk, _, stats = match(dfl, acqs, ppm, merge_ppm=merge_ppm, max_span_ppm=max_span_ppm)
+    print(f"matching: {stats['chains']} chains at {ppm} ppm, {stats['chains_split']} split into "
+          f"{stats['features_from_split_chains']} features; {stats['features']} features")
     iv = consensus_intervals(pk[["feature", "acq", "min", "max", "mz_estimated"]], acqs)
     complete = iv.groupby("feature").acq.nunique() == len(acqs)
     iv = iv[iv.feature.isin(complete[complete].index)]
