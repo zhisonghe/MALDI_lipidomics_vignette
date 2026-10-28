@@ -143,7 +143,7 @@ hr { border: none; border-top: 1px solid var(--rule); }
       <header class="masthead">
         <p class="eyebrow">MALDI-MSI &middot; spatial lipidomics &middot; m/z, pixels and lipids</p>
         <h1>Tutorial for MALDI mass spectrometry imaging (spatial lipidomics) data preprocessing and analysis</h1>
-        <p class="meta">Draft compiled on 27 Sep 2026, revised on 26 Oct 2026 &middot; version 45f2104 (2026-10-28) &middot; 22 sections &middot; companion files: <code>envs/</code>, <code>scripts/</code>, <code>figures/</code></p>
+        <p class="meta">Draft compiled on 27 Sep 2026, revised on 26 Oct 2026 &middot; version 2f43a29 (2026-10-28) &middot; 22 sections &middot; companion files: <code>envs/</code>, <code>scripts/</code>, <code>figures/</code></p>
         <details class="toc-mobile"><summary>Contents</summary><ul>
 <li class="l2"><a href="#introduction">Introduction</a></li>
 <li class="l2"><a href="#preparation">Preparation</a></li>
@@ -1518,6 +1518,12 @@ print(keep.sum(), &quot;of&quot;, len(keep), &quot;features kept&quot;)
 # adata: tissue pixels of all samples x curated features, raw summed intensities in adata.X (dense or sparse)
 adata.layers[&quot;raw&quot;] = adata.X.copy()                # keep the measured values (2-9)
 sc.pp.normalize_total(adata, target_sum=None)       # X = raw / TIC over the curated features x median TIC
+adata.layers[&quot;tic_curated&quot;] = adata.X.copy()        # X will change (log transform in 3-1); this copy does not
+</code></pre>
+<p>The layer names say how the values were made: <code>tic_curated</code> is TIC over the curated features. With another normalization, name the layer after it (e.g. <code>rms_curated</code>). For comparison, the full-spectrum TIC version can be kept as well, from the total of each spectrum that <code>requantify()</code> stores in <code>obs[&quot;tic_spectrum&quot;]</code> (2-4):</p>
+<pre><code class="language-python">import numpy as np, scipy.sparse as sp
+tic_spec = adata.obs[&quot;tic_spectrum&quot;].to_numpy()
+adata.layers[&quot;tic_spectrum&quot;] = sp.diags(np.median(tic_spec) / tic_spec) @ adata.layers[&quot;raw&quot;]
 </code></pre>
 <p>The same by hand, together with RMS and PQN normalization, for which scanpy has no function:</p>
 <pre><code class="language-python">import numpy as np
@@ -1548,12 +1554,14 @@ X_pqn = X / f_pqn[:, None]                         # pixels with too few quotien
 # low: pixels x m/z windows, obsm[&quot;low_centroid&quot;] of the requantified acquisitions, stacked like X (raw counts)
 # window: m/z window of each feature (var[&quot;window&quot;]); acq: acquisition of each pixel
 # pix_factor: the factor each pixel was multiplied by above, e.g. np.median(tic) / tic
+# X: the normalized values, dense (layers[&quot;tic_curated&quot;] above)
 low_scaled = pd.DataFrame(low * pix_factor[:, None])
 per_acq = low_scaled.groupby(np.asarray(acq)).median()           # acquisitions x windows, on the analysis scale
 print((per_acq.max() / per_acq.min()).describe())                # how much acquisitions differ, per window
 thr = np.nan_to_num(per_acq.max().reindex(window).to_numpy(), nan=0.0)
 X_cens = np.where(X &gt;= thr[None, :], X, 0)                        # censored copy; X itself is kept
 print(&quot;nonzero values kept:&quot;, round((X_cens &gt; 0).sum() / (X &gt; 0).sum(), 3))
+adata.layers[&quot;tic_curated_censored&quot;] = X_cens
 </code></pre>
 <p>The censored copy deliberately discards low values in the more sensitive acquisitions (in the zebrafish example, 57% of the nonzero values remained), so use it to check conclusions, not as the primary data. Varying the quantile or the window width shows how strongly a result depends on these choices. When the acquisitions differ several-fold, re-acquiring under matched conditions is better than any correction.</p>
 <p><strong>Order of operations.</strong> Feature QC, pixel normalization and censoring depend on each other. A workable order: (1) a permissive recurrence filter on the requantified raw data (2-5); (2) provisional pixel normalization on the retained features; (3) the censoring diagnostic above; (4) the final recurrence, tissue-enrichment and spatial filters, computed on the data you will analyse (and, for the sensitivity analysis, also on the censored copy); (5) pixel normalization recomputed on this frozen feature set; (6) all thresholds fixed before any comparison between conditions.</p>
@@ -2047,7 +2055,7 @@ final_table = prep.prioritize_adducts_by_signal(path_data=uMAIA_path, acquisitio
 <ul>
 <li><code>obs</code>, one row per pixel: the acquisition and its sample-level metadata (sample or animal, sex, condition, slide, run, section index for serial sections), the pixel coordinates, the tissue mask (2-2) and the tissue piece or region label, and, after registration (2-7), atlas or histology coordinates and regions;</li>
 <li><code>var</code>, one row per feature: the m/z, the matching and requantification details (2-4), the QC metrics and filter flags (2-5) and the annotation (2-8). Values that differ between acquisitions (interval bounds, whether the feature was called) get one column per acquisition;</li>
-<li><code>X</code> and <code>layers</code>: the raw summed intensities and the normalized values (2-6); see the end of this section for which versions to keep;</li>
+<li><code>X</code> and <code>layers</code>: the raw summed intensities (<code>raw</code>, 2-4), the normalized values (<code>tic_curated</code>, and <code>tic_spectrum</code> if kept, 2-6) and the censored copy (<code>tic_curated_censored</code>, 2-6). <code>X</code> is a copy of <code>tic_curated</code> when the table is written; section 3 replaces it by log values and reads the normalized values from <code>layers[&quot;tic_curated&quot;]</code>. See the end of this section for which versions to keep;</li>
 <li><code>obsm</code>: the pixel coordinates (<code>spatial</code>), and later embeddings;</li>
 <li><code>uns</code>: the parameters and software versions used, so that the table records how it was made.</li>
 </ul>
@@ -2095,7 +2103,10 @@ adata.obsm[&quot;spatial&quot;] = adata.obs[[&quot;x&quot;, &quot;y&quot;]].to_n
 adata.uns[&quot;provenance&quot;] = {
     &quot;date&quot;: datetime.date.today().isoformat(),
     &quot;packages&quot;: {p: md.version(p) for p in [&quot;anndata&quot;, &quot;numpy&quot;, &quot;scipy&quot;, &quot;scanpy&quot;, &quot;pyimzML&quot;]},
-    &quot;layers&quot;: {&quot;X&quot;: &quot;TIC over the curated features (2-6)&quot;, &quot;raw&quot;: &quot;summed intensities (2-4)&quot;},
+    &quot;layers&quot;: {&quot;X&quot;: &quot;copy of tic_curated&quot;, &quot;raw&quot;: &quot;summed intensities (2-4)&quot;,
+               &quot;tic_curated&quot;: &quot;raw / TIC over the curated features x median TIC (2-6)&quot;,
+               &quot;tic_spectrum&quot;: &quot;raw / full-spectrum TIC x median (2-6, for comparison)&quot;,
+               &quot;tic_curated_censored&quot;: &quot;tic_curated censored per m/z window (2-6, sensitivity analysis only)&quot;},
     &quot;parameters&quot;: {&quot;matching_ppm&quot;: 2.0, &quot;detection&quot;: 0.05, &quot;annotation_ppm&quot;: 1.0},   # the values you used
 }
 adata.write_h5ad(&quot;msi_preprocessed.h5ad&quot;, compression=&quot;gzip&quot;)
@@ -2144,7 +2155,7 @@ sd.SpatialData(labels=labels, tables={&quot;table&quot;: table}).write(&quot;msi
 </code></pre>
 <p>Images (TIC, selected ion images, histology) are added the same way with <code>Image2DModel</code>, in the same coordinate system; a registered histology image gets the transformation from the registration.</p>
 <p><strong>What a zero means, and which values to keep.</strong> Distinguish four states of a missing value: <em>off-tissue</em> (removed by the mask), <em>not measured</em> (a feature not called or not matched in an acquisition), <em>measured but not retained</em> (no centroid above the instrument's threshold; a zero in a measured spectrum), and <em>truly absent</em>, which in a single pixel cannot be told apart from the previous one. Requantification (2-4) removes the not-measured state; the censoring diagnostic and censored copy (2-6) show how much the meaning of a zero differs between acquisitions. If you skip requantification, store a per-acquisition <code>measured</code> mask (or NaN for unmeasured blocks) and make detection fractions, pseudo-bulk means and normalization factors use only measured blocks: uMAIA's Zarr store, for example, simply has no array for an unmatched acquisition, which a naive loop turns into zeros.</p>
-<p>Keep <strong>three versions</strong> of the intensities in the object, and be explicit about which one each analysis uses: (i) the normalized measured values (<code>adata.X</code>, or a layer), (ii) values used only for clustering (e.g. batch-corrected reconstructions, <code>obsm</code>), and (iii) imputed values (a separate <code>obsm</code>/layer, with a flag per feature). Mixing them up is a common source of false conclusions in MSI analysis (see 3-4).</p>
+<p>Keep <strong>three versions</strong> of the intensities in the object, and be explicit about which one each analysis uses: (i) the normalized measured values (<code>layers[&quot;tic_curated&quot;]</code>, and <code>X</code> until it is log-transformed in 3-1), (ii) values used only for clustering (e.g. batch-corrected reconstructions, <code>obsm</code>), and (iii) imputed values (a separate <code>obsm</code>/layer, with a flag per feature). Mixing them up is a common source of false conclusions in MSI analysis (see 3-4).</p>
 <h2 id="analysis-of-spatial-lipidomics-data">Analysis of spatial lipidomics data</h2>
 <h3 id="3-1-feature-selection">3-1 Feature selection</h3>
 <p>As with highly variable genes in scRNA-seq, clustering works better on a subset of informative, well-measured features. For the LBA, &quot;well-measured&quot; meant consistent across serial sections. The LBA (notebook <code>004-FeatureSelectionForEmbedding</code>, reference brain only) computed for each feature</p>
@@ -2167,16 +2178,15 @@ prep.save_msi_dataset()
 </code></pre>
 <p>(Note that the EUCLID tutorial uses <code>moran_threshold=0.25</code> while the LBA notebooks used 0.4.)</p>
 <h4 id="without-euclid-scanpy-and-squidpy">Without EUCLID (scanpy and squidpy)</h4>
-<p>Start from the table written in 2-9. Its <code>X</code> holds the normalized intensities (2-6) without a log transform. As in scRNA-seq, log-transform <code>X</code> first, after keeping the normalized values in a layer. Several steps need the normalized values themselves: the LBA score and Moran's I below (computed on them in 2-5 as well), NMF (3-2), and all comparisons of intensities (3-4 to 3-6). The per-section summaries come from <code>sc.get.aggregate</code>:</p>
+<p>Start from the table written in 2-9. Its <code>X</code> is a copy of the normalized intensities in <code>layers[&quot;tic_curated&quot;]</code> (2-6), without a log transform. As in scRNA-seq, log-transform <code>X</code> first; the normalized values stay in the layer. Several steps need them: the LBA score and Moran's I below (computed on them in 2-5 as well), NMF (3-2), and all comparisons of intensities (3-4 to 3-6). The per-section summaries come from <code>sc.get.aggregate</code>:</p>
 <pre><code class="language-python">import numpy as np, pandas as pd, scanpy as sc
 
 adata = sc.read_h5ad(&quot;msi_preprocessed.h5ad&quot;)        # tissue pixels x features, X = normalized intensities (2-9)
-adata.layers[&quot;normalized&quot;] = adata.X.copy()          # the normalized values, kept before the log transform
-sc.pp.log1p(adata)
+sc.pp.log1p(adata)                                   # X = log(1 + tic_curated); layers[&quot;tic_curated&quot;] is unchanged
 section = &quot;sample&quot;                                   # obs column with one value per section (acquisition)
 
 # per section and feature: mean, variance and detection fraction
-agg = sc.get.aggregate(adata, by=section, func=[&quot;mean&quot;, &quot;var&quot;, &quot;count_nonzero&quot;], layer=&quot;normalized&quot;)
+agg = sc.get.aggregate(adata, by=section, func=[&quot;mean&quot;, &quot;var&quot;, &quot;count_nonzero&quot;], layer=&quot;tic_curated&quot;)
 sec_mean = pd.DataFrame(agg.layers[&quot;mean&quot;], index=agg.obs_names, columns=agg.var_names)
 sec_var = pd.DataFrame(agg.layers[&quot;var&quot;], index=agg.obs_names, columns=agg.var_names)
 det = pd.DataFrame(agg.layers[&quot;count_nonzero&quot;] / agg.obs[[&quot;n_obs_aggregated&quot;]].to_numpy(),
@@ -2192,7 +2202,7 @@ morans = {}
 for s in agg.obs_names:
     S = adata[adata.obs[section] == s].copy()
     sq.gr.spatial_neighbors(S, coord_type=&quot;grid&quot;, n_neighs=4)
-    sq.gr.spatial_autocorr(S, mode=&quot;moran&quot;, n_perms=None, layer=&quot;normalized&quot;)
+    sq.gr.spatial_autocorr(S, mode=&quot;moran&quot;, n_perms=None, layer=&quot;tic_curated&quot;)
     morans[s] = S.uns[&quot;moranI&quot;][&quot;I&quot;].reindex(adata.var_names)
 morans = pd.DataFrame(morans)                        # features x sections
 </code></pre>
@@ -2218,7 +2228,7 @@ selected_hvf = adata.var_names[adata.var[&quot;highly_variable&quot;] &amp; (ada
 </code></pre>
 <p>Two settings differ from the scRNA-seq defaults:</p>
 <ul>
-<li>the flavor expects log values in <code>X</code>: it reverses the log with <code>expm1</code> internally, and on normalized intensities in the thousands (e.g. <code>layer=&quot;normalized&quot;</code>) this overflows and the call fails;</li>
+<li>the flavor expects log values in <code>X</code>: it reverses the log with <code>expm1</code> internally, and on normalized intensities in the thousands (e.g. <code>layer=&quot;tic_curated&quot;</code>) this overflows and the call fails;</li>
 <li>the default cutoffs (<code>min_mean=0.0125</code>, <code>max_mean=3</code>, <code>min_disp=0.5</code>) were set for log-transformed counts normalized to 10,000 per cell. The mean cutoffs depend on the intensity scale, and there is no reason to exclude abundant lipids: on the zebrafish sections, <code>max_mean=3</code> would remove 1,540 of the 2,637 features detected in every section. Turn them off; the detection filter already removes rarely detected features. The dispersion cutoff <code>min_disp=0.5</code> applies to the standardized dispersion and does not depend on the scale.</li>
 </ul>
 <p>Because the dispersion is averaged, a feature that is very variable in one section can pass. For strict consistency, require the feature to be highly variable in every section (<code>detected.var[&quot;highly_variable_intersection&quot;]</code>). Alternatively, <code>n_top_genes</code> fixes the number of features instead of the cutoff; it ignores <code>min_mean</code>, <code>max_mean</code> and <code>min_disp</code>, and ranks features first by the number of sections in which they are highly variable.</p>
@@ -2284,7 +2294,7 @@ emb.save_msi_dataset(plot_embeddings=True)
 <pre><code class="language-python">import scanpy as sc, numpy as np, harmonypy as hm
 from sklearn.decomposition import NMF
 
-Xsel = adata[:, selected].layers[&quot;normalized&quot;]   # non-negative normalized intensities, not log (3-1)
+Xsel = adata[:, selected].layers[&quot;tic_curated&quot;]   # non-negative normalized intensities, not log (3-1)
 Xsel = Xsel.toarray() if hasattr(Xsel, &quot;toarray&quot;) else np.asarray(Xsel)
 Xsel = Xsel / np.percentile(Xsel, 99, axis=0).clip(1e-12)   # comparable scales: abundant lipids do not dominate
 assert Xsel.min() &gt;= 0, &quot;NMF needs non-negative input&quot;
@@ -2373,7 +2383,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 
 held_out = &quot;section 26&quot;
 train = (adata.obs[&quot;sample&quot;] != held_out).to_numpy()
-y = adata[:, lipid].layers[&quot;normalized&quot;]
+y = adata[:, lipid].layers[&quot;tic_curated&quot;]
 y = (y.toarray() if hasattr(y, &quot;toarray&quot;) else np.asarray(y)).ravel()
 model = HistGradientBoostingRegressor(max_iter=300, learning_rate=0.05, random_state=0)
 model.fit(adata.obsm[&quot;X_harmony&quot;][train], y[train])
@@ -2400,7 +2410,7 @@ print(&quot;held-out r:&quot;, np.corrcoef(restored[~train], y[~train])[0, 1])
 <p><strong>Marker lipids.</strong> Mann-Whitney U tests of each cluster versus all others (or versus siblings in a hierarchy), with BH correction, on 0-1 scaled measured values; report the effect size (log2 fold change of means) and the fraction of pixels above background. Pixels are spatially autocorrelated and nested in sections and animals, so these p-values are not valid inference, and BH correction does not fix that. Use them, or better the effect sizes, only to rank candidate markers. To claim that a lipid is enriched in a cluster, aggregate per animal x cluster and test with the animal as unit, as in 3-6.</p>
 <pre><code class="language-python">import numpy as np, pandas as pd
 # measured (not imputed or batch-corrected) values (2-9), scaled 0-1 per lipid between its 0.5 and 99.5 percentiles
-M = adata.layers[&quot;normalized&quot;]
+M = adata.layers[&quot;tic_curated&quot;]
 M = M.toarray() if hasattr(M, &quot;toarray&quot;) else np.asarray(M)
 lo, hi = np.percentile(M, 0.5, axis=0), np.percentile(M, 99.5, axis=0)
 adata.layers[&quot;measured_scaled&quot;] = np.clip((M - lo) / np.where(hi &gt; lo, hi - lo, 1), 0, 1)
@@ -2446,9 +2456,10 @@ import statsmodels.formula.api as smf
 from statsmodels.stats.multitest import multipletests
 
 # one row per pixel: the measured, normalized values (3-1; not log, not imputed) plus the metadata columns
+# (for the censored copy of 2-6: layer=&quot;tic_curated_censored&quot;)
 # (if there is no Sex column, drop &quot;Sex&quot; from the grouping keys here and below)
 lipids = list(adata.var_names)                                     # or the lipids to test
-df = adata.obs[[&quot;Sample&quot;, &quot;SectionID&quot;, &quot;Condition&quot;, &quot;Sex&quot;, &quot;lipizone&quot;]].join(adata.to_df(layer=&quot;normalized&quot;))
+df = adata.obs[[&quot;Sample&quot;, &quot;SectionID&quot;, &quot;Condition&quot;, &quot;Sex&quot;, &quot;lipizone&quot;]].join(adata.to_df(layer=&quot;tic_curated&quot;))
 pb = (df.groupby([&quot;Sample&quot;, &quot;Condition&quot;, &quot;Sex&quot;, &quot;lipizone&quot;], observed=True)[lipids]
         .mean().reset_index())                                     # one row per animal x lipizone
 pb[&quot;Condition&quot;] = pd.Categorical(pb[&quot;Condition&quot;], categories=[&quot;control&quot;, &quot;treated&quot;])  # reference first
