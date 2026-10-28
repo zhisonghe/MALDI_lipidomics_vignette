@@ -1792,14 +1792,19 @@ On the three zebrafish sections of 1-5, preprocessed as for the figures of secti
 ![Feature selection](figures/fig_3-1_features.png)
 *Figure 3-1. Left: LBA score (on z-scored features, as in the LBA) against mean Moran's I for the 2,637 zebrafish features detected in at least 5% of the tissue pixels of every section; dashed lines: the cutoffs `score > 0` and Moran's I > 0.4. Right: mean Moran's I against the lowest detection fraction over the three sections; the selected features (orange) pass both criteria (`scripts/make_analysis_figures.py`).*
 
-#### scanpy's highly variable features in place of the LBA score
-In scRNA-seq, informative features are chosen with `sc.pp.highly_variable_genes`. None of its flavors computes the LBA score, but `flavor="seurat"` with `batch_key` is related: for each section, it computes the dispersion (variance over mean) of every feature and standardizes it among features of similar mean; it then averages the standardized dispersion over sections and calls features above a cutoff highly variable. Like the LBA score, it looks at the variance within each section, combines the sections, and does not depend on the intensity scale. It differs in what the variance is compared with: the LBA score compares the variance of a feature within sections with its total variance, the standardized dispersion compares it with that of features of similar abundance. It can replace the score; detection and Moran's I remain separate criteria:
+#### scanpy's highly variable features and the LBA score
+In scRNA-seq, informative features are chosen with `sc.pp.highly_variable_genes`. None of its flavors computes the LBA score, but `flavor="seurat"` with `batch_key` is related: for each section, it computes the dispersion (variance over mean) of every feature and standardizes it among features of similar mean; it then averages the standardized dispersion over sections and calls features above a cutoff highly variable. Like the LBA score, it starts from the variance within each section and does not depend on the intensity scale. It compares this variance with something else, and so answers a different question:
+* the LBA score compares the within-section variance of a feature with the feature's own total variance. It is high when little of the variation lies between sections and the variation is similar in all sections, however small it is. It is a consistency criterion: it penalizes section effects;
+* the standardized dispersion compares the variance of a feature with that of features of similar abundance. It is high when the feature varies more than expected. It is an informativeness criterion: differences between section means do not lower it.
+
+The two complement each other, and neither measures spatial structure, which is what Moran's I adds. A selection on all of them, after the detection filter:
 
 ```python
 detected = adata[:, adata.var["det_min"] >= 0.05].copy()     # detection first: sparse features have a high dispersion
 sc.pp.highly_variable_genes(detected, flavor="seurat", batch_key=section, min_mean=0, max_mean=np.inf)
 adata.var["highly_variable"] = detected.var["highly_variable"].reindex(adata.var_names, fill_value=False)
-selected_hvf = adata.var_names[adata.var["highly_variable"] & (adata.var["moran_mean"] > 0.4)]   # use as `selected` in 3-2
+selected_hvf = adata.var_names[adata.var["highly_variable"] & (adata.var["moran_mean"] > 0.4)
+                               & (score > 0)]           # use as `selected` in 3-2
 ```
 
 Two settings differ from the scRNA-seq defaults:
@@ -1816,7 +1821,9 @@ On the zebrafish sections, 808 of the 2,637 detected features are called highly 
 | LBA score (z-scored features) | -0.29 | -0.08 | 221 |
 | (all 2,637 detected features) | | | 944 of 2,637 |
 
-Neither score follows abundance closely, but they rank features differently. The top features of the LBA score have a mean Moran's I above 0.4 less often (27%) than the detected features overall (36%): a variance that lies evenly within sections can be spatial structure or noise. The standardized dispersion is weakly correlated with Moran's I, and its top features pass 0.4 more often (48%). Neither replaces Moran's I, which measures spatial structure directly; 389 features pass both the dispersion and the Moran's I criteria (`selected_hvf`). With only three sections, the variance of the section variances rests on three values each; with more sections, as in the LBA, both scores combine more sections and become more stable. Like the 0.4 for Moran's I, `min_disp` is a choice; check the images of features just above and just below both cutoffs.
+Neither score follows abundance closely, but they rank features differently. The top features of the LBA score have a mean Moran's I above 0.4 less often (27%) than the detected features overall (36%): a variance that lies evenly within sections can be spatial structure or noise. The standardized dispersion is weakly correlated with Moran's I, and its top features pass 0.4 more often (48%). 389 features pass the dispersion and the Moran's I criteria, and all of them also have a positive LBA score (`selected_hvf`). With only three sections, the variance of the section variances rests on three values each; with more sections, as in the LBA, both scores combine more sections and become more stable. Like the 0.4 for Moran's I, `min_disp` is a choice; check the images of features just above and just below both cutoffs.
+
+**What the LBA score penalizes.** Any difference between sections lowers the score, whatever its cause: a batch effect, but also a lipid that changes with condition when sections of several conditions are pooled, or a lipid restricted to a region that appears in only some serial sections. Such lipids are then left out of the embedding and the clustering, which become less sensitive to exactly these differences. The LBA computed the score on one reference brain (one animal, one condition), and accepted that regionally restricted lipids were left out, to be restored from the embedding (3-4). With several conditions, compute the score within each condition (or on a reference condition) rather than on all sections pooled. In any case, feature selection only decides what goes into the embedding: compare conditions (3-6) on all well-measured lipids, not only on the selected ones.
 
 ### 3-2 Dimensionality reduction and data integration
 <sub><a href="#top">(Back to top)</a></sub></br>
