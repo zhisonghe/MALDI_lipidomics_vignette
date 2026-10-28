@@ -1765,20 +1765,22 @@ On the three zebrafish sections of 1-5, preprocessed as for the figures of secti
 *Figure 3-1. Left: fraction of the 5,486 zebrafish features with a positive LBA score after all intensities were multiplied by a constant; the cutoff `score > 0` selects almost all or almost none of them depending on the scale. Right: mean Moran's I against the lowest detection fraction over the three sections; the selected features (orange) pass both criteria (`scripts/make_analysis_figures.py`).*
 
 #### scanpy's highly variable features in place of the LBA score
-The idea behind the LBA score, variance within sections that is consistent between sections, can be kept without its dependence on the intensity scale. In scRNA-seq this is the job of `sc.pp.highly_variable_genes`. None of its flavors computes the LBA score, but `flavor="seurat"` with `batch_key` does something close: for each section, it computes the dispersion (variance over mean) of every feature and standardizes it among features of similar mean, and it then ranks features first by the number of sections in which they are highly variable. It replaces the score; detection and Moran's I remain separate criteria:
+The idea behind the LBA score, variance within sections that is consistent between sections, can be kept without its dependence on the intensity scale. In scRNA-seq this is the job of `sc.pp.highly_variable_genes`. None of its flavors computes the LBA score, but `flavor="seurat"` with `batch_key` does something close: for each section, it computes the dispersion (variance over mean) of every feature and standardizes it among features of similar mean; it then averages the standardized dispersion over sections and calls features above a cutoff highly variable. It replaces the score; detection and Moran's I remain separate criteria:
 
 ```python
 detected = adata[:, adata.var["det_min"] >= 0.05].copy()     # detection first: sparse features have a high dispersion
-sc.pp.highly_variable_genes(detected, flavor="seurat", batch_key=section, n_top_genes=1000)
+sc.pp.highly_variable_genes(detected, flavor="seurat", batch_key=section, min_mean=0, max_mean=np.inf)
 adata.var["highly_variable"] = detected.var["highly_variable"].reindex(adata.var_names, fill_value=False)
 selected_hvf = adata.var_names[adata.var["highly_variable"] & (adata.var["moran_mean"] > 0.4)]   # use as `selected` in 3-2
 ```
 
 Two settings differ from the scRNA-seq defaults:
 * the flavor expects log values in `X`: it reverses the log with `expm1` internally, and on normalized intensities in the thousands (e.g. `layer="normalized"`) this overflows and the call fails;
-* the default cutoffs (`min_mean=0.0125`, `max_mean=3`, `min_disp=0.5`) were set for log-transformed counts normalized to 10,000 per cell. On TIC-normalized MSI intensities, the mean cutoff silently removes the abundant features (on the zebrafish sections, 1,540 of the 2,637 features detected in every section have a mean above 3). Give `n_top_genes`, which ignores these cutoffs, or set the cutoffs for your scale.
+* the default cutoffs (`min_mean=0.0125`, `max_mean=3`, `min_disp=0.5`) were set for log-transformed counts normalized to 10,000 per cell. The mean cutoffs depend on the intensity scale, and there is no reason to exclude abundant lipids: on the zebrafish sections, `max_mean=3` would remove 1,540 of the 2,637 features detected in every section. Turn them off; the detection filter already removes rarely detected features. The dispersion cutoff `min_disp=0.5` applies to the standardized dispersion and does not depend on the scale.
 
-On the zebrafish sections, among the 2,637 features detected in at least 5% of the tissue pixels of every section, the standardized dispersion is not correlated with mean Moran's I (Spearman ρ = 0.00). The two criteria measure different things, pixel-to-pixel variance and spatial structure, so Moran's I is still needed. Of the 1,000 top-ranked features, 455 also have a mean Moran's I above 0.4. The LBA score at the scale of these data keeps 1 feature (`keep_lba` above). As for highly variable genes, `n_top_genes` is a choice; check the images of features just above and just below the cutoff.
+Because the dispersion is averaged, a feature that is very variable in one section can pass. For strict consistency, require the feature to be highly variable in every section (`detected.var["highly_variable_intersection"]`). Alternatively, `n_top_genes` fixes the number of features instead of the cutoff; it ignores `min_mean`, `max_mean` and `min_disp`, and ranks features first by the number of sections in which they are highly variable.
+
+On the zebrafish sections, 808 of the 2,637 detected features are called highly variable (468 in all three sections). The standardized dispersion is only weakly correlated with mean Moran's I (Spearman ρ = 0.23): the two criteria measure different things, pixel-to-pixel variance and spatial structure, so Moran's I is still needed. Of the 808 features, 389 also have a mean Moran's I above 0.4. The LBA score at the scale of these data keeps 1 feature (`keep_lba` above). Like the 0.4 for Moran's I, `min_disp` is a choice; check the images of features just above and just below both cutoffs.
 
 ### 3-2 Dimensionality reduction and data integration
 <sub><a href="#top">(Back to top)</a></sub></br>
