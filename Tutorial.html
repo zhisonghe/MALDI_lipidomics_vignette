@@ -143,7 +143,7 @@ hr { border: none; border-top: 1px solid var(--rule); }
       <header class="masthead">
         <p class="eyebrow">MALDI-MSI &middot; spatial lipidomics &middot; m/z, pixels and lipids</p>
         <h1>Tutorial for MALDI mass spectrometry imaging (spatial lipidomics) data preprocessing and analysis</h1>
-        <p class="meta">Draft compiled on 27 Sep 2026, revised on 26 Oct 2026 &middot; version 8f82c3b (2026-10-28) &middot; 22 sections &middot; companion files: <code>envs/</code>, <code>scripts/</code>, <code>figures/</code></p>
+        <p class="meta">Draft compiled on 27 Sep 2026, revised on 26 Oct 2026 &middot; version c9bbe74 (2026-10-28) &middot; 22 sections &middot; companion files: <code>envs/</code>, <code>scripts/</code>, <code>figures/</code></p>
         <details class="toc-mobile"><summary>Contents</summary><ul>
 <li class="l2"><a href="#introduction">Introduction</a></li>
 <li class="l2"><a href="#preparation">Preparation</a></li>
@@ -2167,15 +2167,16 @@ prep.save_msi_dataset()
 </code></pre>
 <p>(Note that the EUCLID tutorial uses <code>moran_threshold=0.25</code> while the LBA notebooks used 0.4.)</p>
 <h4 id="without-euclid-scanpy-and-squidpy">Without EUCLID (scanpy and squidpy)</h4>
-<p>Start from the table written in 2-9. Its <code>X</code> holds the normalized intensities (2-6) without a log transform. Keep them in <code>X</code>, because NMF (3-2) needs non-negative values on the original scale, and put a log-transformed copy in a layer for the steps that expect log values, such as scanpy's highly variable feature selection below. The per-section summaries come from <code>sc.get.aggregate</code>, and Moran's I per section from squidpy, as in 2-5:</p>
+<p>Start from the table written in 2-9. Its <code>X</code> holds the normalized intensities (2-6) without a log transform. As in scRNA-seq, log-transform <code>X</code> first, after keeping the normalized values in a layer. Several steps need the normalized values themselves: the LBA score and Moran's I below (computed on them in 2-5 as well), NMF (3-2), and all comparisons of intensities (3-4 to 3-6). The per-section summaries come from <code>sc.get.aggregate</code>, and Moran's I per section from squidpy:</p>
 <pre><code class="language-python">import numpy as np, pandas as pd, scanpy as sc, squidpy as sq
 
 adata = sc.read_h5ad(&quot;msi_preprocessed.h5ad&quot;)        # tissue pixels x features, X = normalized intensities (2-9)
-adata.layers[&quot;log1p&quot;] = sc.pp.log1p(adata.X, copy=True)
+adata.layers[&quot;normalized&quot;] = adata.X.copy()          # the normalized values, kept before the log transform
+sc.pp.log1p(adata)
 section = &quot;sample&quot;                                   # obs column with one value per section (acquisition)
 
 # per section and feature: mean, variance and detection fraction
-agg = sc.get.aggregate(adata, by=section, func=[&quot;mean&quot;, &quot;var&quot;, &quot;count_nonzero&quot;])
+agg = sc.get.aggregate(adata, by=section, func=[&quot;mean&quot;, &quot;var&quot;, &quot;count_nonzero&quot;], layer=&quot;normalized&quot;)
 sec_mean = pd.DataFrame(agg.layers[&quot;mean&quot;], index=agg.obs_names, columns=agg.var_names)
 sec_var = pd.DataFrame(agg.layers[&quot;var&quot;], index=agg.obs_names, columns=agg.var_names)
 det = pd.DataFrame(agg.layers[&quot;count_nonzero&quot;] / agg.obs[[&quot;n_obs_aggregated&quot;]].to_numpy(),
@@ -2186,7 +2187,7 @@ morans = {}
 for s in agg.obs_names:
     S = adata[adata.obs[section] == s].copy()
     sq.gr.spatial_neighbors(S, coord_type=&quot;grid&quot;, n_neighs=4)
-    sq.gr.spatial_autocorr(S, mode=&quot;moran&quot;, n_perms=None)
+    sq.gr.spatial_autocorr(S, mode=&quot;moran&quot;, n_perms=None, layer=&quot;normalized&quot;)
     morans[s] = S.uns[&quot;moranI&quot;][&quot;I&quot;].reindex(adata.var_names)
 morans = pd.DataFrame(morans)                        # features x sections
 </code></pre>
@@ -2206,13 +2207,13 @@ selected = adata.var_names[adata.var[&quot;selected&quot;]]    # the features us
 <h4 id="scanpys-highly-variable-features-in-place-of-the-lba-score">scanpy's highly variable features in place of the LBA score</h4>
 <p>The idea behind the LBA score, variance within sections that is consistent between sections, can be kept without its dependence on the intensity scale. In scRNA-seq this is the job of <code>sc.pp.highly_variable_genes</code>. None of its flavors computes the LBA score, but <code>flavor=&quot;seurat&quot;</code> with <code>batch_key</code> does something close: for each section, it computes the dispersion (variance over mean) of every feature and standardizes it among features of similar mean, and it then ranks features first by the number of sections in which they are highly variable. It replaces the score; detection and Moran's I remain separate criteria:</p>
 <pre><code class="language-python">detected = adata[:, adata.var[&quot;det_min&quot;] &gt;= 0.05].copy()     # detection first: sparse features have a high dispersion
-sc.pp.highly_variable_genes(detected, layer=&quot;log1p&quot;, flavor=&quot;seurat&quot;, batch_key=section, n_top_genes=1000)
+sc.pp.highly_variable_genes(detected, flavor=&quot;seurat&quot;, batch_key=section, n_top_genes=1000)
 adata.var[&quot;highly_variable&quot;] = detected.var[&quot;highly_variable&quot;].reindex(adata.var_names, fill_value=False)
 selected_hvf = adata.var_names[adata.var[&quot;highly_variable&quot;] &amp; (adata.var[&quot;moran_mean&quot;] &gt; 0.4)]   # use as `selected` in 3-2
 </code></pre>
 <p>Two settings differ from the scRNA-seq defaults:</p>
 <ul>
-<li>the flavor expects log values: it reverses the log with <code>expm1</code> internally, and on normalized intensities in the thousands this overflows and the call fails. Hence the <code>log1p</code> layer;</li>
+<li>the flavor expects log values in <code>X</code>: it reverses the log with <code>expm1</code> internally, and on normalized intensities in the thousands (e.g. <code>layer=&quot;normalized&quot;</code>) this overflows and the call fails;</li>
 <li>the default cutoffs (<code>min_mean=0.0125</code>, <code>max_mean=3</code>, <code>min_disp=0.5</code>) were set for log-transformed counts normalized to 10,000 per cell. On TIC-normalized MSI intensities, the mean cutoff silently removes the abundant features (on the zebrafish sections, 1,540 of the 2,637 features detected in every section have a mean above 3). Give <code>n_top_genes</code>, which ignores these cutoffs, or set the cutoffs for your scale.</li>
 </ul>
 <p>On the zebrafish sections, among the 2,637 features detected in at least 5% of the tissue pixels of every section, the standardized dispersion is not correlated with mean Moran's I (Spearman ρ = 0.00). The two criteria measure different things, pixel-to-pixel variance and spatial structure, so Moran's I is still needed. Of the 1,000 top-ranked features, 455 also have a mean Moran's I above 0.4. The LBA score at the scale of these data keeps 1 feature (<code>keep_lba</code> above). As for highly variable genes, <code>n_top_genes</code> is a choice; check the images of features just above and just below the cutoff.</p>
@@ -2242,7 +2243,7 @@ emb.save_msi_dataset(plot_embeddings=True)
 <pre><code class="language-python">import scanpy as sc, numpy as np, harmonypy as hm
 from sklearn.decomposition import NMF
 
-Xsel = adata[:, selected].X                    # non-negative normalized intensities
+Xsel = adata[:, selected].layers[&quot;normalized&quot;]   # non-negative normalized intensities, not log (3-1)
 Xsel = Xsel.toarray() if hasattr(Xsel, &quot;toarray&quot;) else np.asarray(Xsel)
 Xsel = Xsel / np.percentile(Xsel, 99, axis=0).clip(1e-12)   # comparable scales: abundant lipids do not dominate
 assert Xsel.min() &gt;= 0, &quot;NMF needs non-negative input&quot;
@@ -2331,7 +2332,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 
 held_out = &quot;section 26&quot;
 train = (adata.obs[&quot;sample&quot;] != held_out).to_numpy()
-y = adata[:, lipid].X
+y = adata[:, lipid].layers[&quot;normalized&quot;]
 y = (y.toarray() if hasattr(y, &quot;toarray&quot;) else np.asarray(y)).ravel()
 model = HistGradientBoostingRegressor(max_iter=300, learning_rate=0.05, random_state=0)
 model.fit(adata.obsm[&quot;X_harmony&quot;][train], y[train])
@@ -2358,7 +2359,8 @@ print(&quot;held-out r:&quot;, np.corrcoef(restored[~train], y[~train])[0, 1])
 <p><strong>Marker lipids.</strong> Mann-Whitney U tests of each cluster versus all others (or versus siblings in a hierarchy), with BH correction, on 0-1 scaled measured values; report the effect size (log2 fold change of means) and the fraction of pixels above background. Pixels are spatially autocorrelated and nested in sections and animals, so these p-values are not valid inference, and BH correction does not fix that. Use them, or better the effect sizes, only to rank candidate markers. To claim that a lipid is enriched in a cluster, aggregate per animal x cluster and test with the animal as unit, as in 3-6.</p>
 <pre><code class="language-python">import numpy as np, pandas as pd
 # measured (not imputed or batch-corrected) values (2-9), scaled 0-1 per lipid between its 0.5 and 99.5 percentiles
-M = adata.X.toarray() if hasattr(adata.X, &quot;toarray&quot;) else np.asarray(adata.X)
+M = adata.layers[&quot;normalized&quot;]
+M = M.toarray() if hasattr(M, &quot;toarray&quot;) else np.asarray(M)
 lo, hi = np.percentile(M, 0.5, axis=0), np.percentile(M, 99.5, axis=0)
 adata.layers[&quot;measured_scaled&quot;] = np.clip((M - lo) / np.where(hi &gt; lo, hi - lo, 1), 0, 1)
 adata.obs[&quot;lipizone&quot;] = adata.obs[&quot;leiden&quot;]                  # or the EUCLID lipizones (3-3)
@@ -2402,8 +2404,10 @@ celltype_lipidome = np.vstack([nnls(A, B[:, j])[0] for j in range(B.shape[1])]).
 import statsmodels.formula.api as smf
 from statsmodels.stats.multitest import multipletests
 
-# df: one row per pixel, measured (not imputed) lipid values plus metadata columns
+# one row per pixel: the measured, normalized values (3-1; not log, not imputed) plus the metadata columns
 # (if there is no Sex column, drop &quot;Sex&quot; from the grouping keys here and below)
+lipids = list(adata.var_names)                                     # or the lipids to test
+df = adata.obs[[&quot;Sample&quot;, &quot;SectionID&quot;, &quot;Condition&quot;, &quot;Sex&quot;, &quot;lipizone&quot;]].join(adata.to_df(layer=&quot;normalized&quot;))
 pb = (df.groupby([&quot;Sample&quot;, &quot;Condition&quot;, &quot;Sex&quot;, &quot;lipizone&quot;], observed=True)[lipids]
         .mean().reset_index())                                     # one row per animal x lipizone
 pb[&quot;Condition&quot;] = pd.Categorical(pb[&quot;Condition&quot;], categories=[&quot;control&quot;, &quot;treated&quot;])  # reference first
