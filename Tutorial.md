@@ -1718,7 +1718,7 @@ prep.save_msi_dataset()
 Start from the table written in 2-9. Its `X` holds the normalized intensities (2-6) without a log transform. As in scRNA-seq, log-transform `X` first, after keeping the normalized values in a layer. Several steps need the normalized values themselves: the LBA score and Moran's I below (computed on them in 2-5 as well), NMF (3-2), and all comparisons of intensities (3-4 to 3-6). The per-section summaries come from `sc.get.aggregate`:
 
 ```python
-import numpy as np, pandas as pd, scanpy as sc, squidpy as sq
+import numpy as np, pandas as pd, scanpy as sc
 
 adata = sc.read_h5ad("msi_preprocessed.h5ad")        # tissue pixels x features, X = normalized intensities (2-9)
 adata.layers["normalized"] = adata.X.copy()          # the normalized values, kept before the log transform
@@ -1742,6 +1742,8 @@ morans = adata.var[[f"moran_{s}" for s in agg.obs_names]].set_axis(agg.obs_names
 Otherwise, compute it here with squidpy, on the normalized values and a rook neighbourhood on the pixel raster as in 2-5:
 
 ```python
+import squidpy as sq
+
 morans = {}
 for s in agg.obs_names:
     S = adata[adata.obs[section] == s].copy()
