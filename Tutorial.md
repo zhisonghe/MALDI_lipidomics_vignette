@@ -1714,23 +1714,65 @@ prep.save_msi_dataset()
 
 (Note that the EUCLID tutorial uses `moran_threshold=0.25` while the LBA notebooks used 0.4.)
 
-The same heuristic in a few lines reproduces the LBA's choice. The score subtracts quantities with different units (a variance and a variance of variances), so its value and the `score > 0` cutoff depend on the intensity scale. For new data, rank features on separately standardized criteria instead, such as within-sample variance, recurrence, spatial structure and replicate reproducibility:
+#### Without EUCLID (scanpy and squidpy)
+Start from the table written in 2-9. Its `X` holds the normalized intensities (2-6) without a log transform. Keep them in `X`, because NMF (3-2) needs non-negative values on the original scale, and put a log-transformed copy in a layer for the steps that expect log values, such as scanpy's highly variable feature selection below. The per-section summaries come from `sc.get.aggregate`, and Moran's I per section from squidpy, as in 2-5:
 
 ```python
-import numpy as np, pandas as pd
-# df: one row per tissue pixel, the normalized values of the features (list `features`) and a "Section" column
-# morans: features x sections, Moran's I per section (2-5)
-sec_var = df.groupby("Section")[features].var()
-score = sec_var.mean() - sec_var.var() / 2
-dropouts = (df.groupby("Section")[features].mean() < 1.5e-4).sum()
-keep = (morans.mean(axis=1) > 0.4) & (dropouts < 4) & (score > 0)
-selected = keep.index[keep]                    # the features used for the embedding (3-2)
+import numpy as np, pandas as pd, scanpy as sc, squidpy as sq
+
+adata = sc.read_h5ad("msi_preprocessed.h5ad")        # tissue pixels x features, X = normalized intensities (2-9)
+adata.layers["log1p"] = sc.pp.log1p(adata.X, copy=True)
+section = "sample"                                   # obs column with one value per section (acquisition)
+
+# per section and feature: mean, variance and detection fraction
+agg = sc.get.aggregate(adata, by=section, func=["mean", "var", "count_nonzero"])
+sec_mean = pd.DataFrame(agg.layers["mean"], index=agg.obs_names, columns=agg.var_names)
+sec_var = pd.DataFrame(agg.layers["var"], index=agg.obs_names, columns=agg.var_names)
+det = pd.DataFrame(agg.layers["count_nonzero"] / agg.obs[["n_obs_aggregated"]].to_numpy(),
+                   index=agg.obs_names, columns=agg.var_names)
+
+# Moran's I per section, rook neighbourhood on the pixel raster (skip if 2-5 stored it in adata.var)
+morans = {}
+for s in agg.obs_names:
+    S = adata[adata.obs[section] == s].copy()
+    sq.gr.spatial_neighbors(S, coord_type="grid", n_neighs=4)
+    sq.gr.spatial_autocorr(S, mode="moran", n_perms=None)
+    morans[s] = S.uns["moranI"]["I"].reindex(adata.var_names)
+morans = pd.DataFrame(morans)                        # features x sections
+```
+
+The LBA heuristic is then:
+
+```python
+score = sec_var.mean() - sec_var.var() / 2           # over sections: mean minus half the variance of the within-section variance
+dropouts = (sec_mean < 1.5e-4).sum()
+keep_lba = (morans.mean(axis=1) > 0.4) & (dropouts < 4) & (score > 0)
+```
+
+The score subtracts quantities with different units (a variance and a variance of variances), so its value and the `score > 0` cutoff depend on the intensity scale. For new data, use separate criteria with their own meaning instead, such as within-sample variance, recurrence, spatial structure and replicate reproducibility. Here, spatial structure and detection in every section:
+
+```python
+adata.var["moran_mean"] = morans.mean(axis=1)
+adata.var["det_min"] = det.min()
+adata.var["selected"] = (adata.var["moran_mean"] > 0.4) & (adata.var["det_min"] >= 0.05)
+selected = adata.var_names[adata.var["selected"]]    # the features used for the embedding (3-2)
 ```
 
 On the three zebrafish sections of 1-5, preprocessed as for the figures of section 2 (5,486 features detected in at least 5% of the tissue pixels of one section, TIC-normalized), the score behaves exactly like this: multiplying all intensities by a constant changes the fraction of features with a positive score from almost all to almost none (Figure 3-1, left). Separate criteria do not have this problem. 944 features have a mean Moran's I above 0.4 and are detected in at least 5% of the tissue pixels of every section (right). The figures below use 943 of them; one is kept out of the embedding to be restored from it in 3-4.
 
 ![Feature selection](figures/fig_3-1_features.png)
 *Figure 3-1. Left: fraction of the 5,486 zebrafish features with a positive LBA score after all intensities were multiplied by a constant; the cutoff `score > 0` selects almost all or almost none of them depending on the scale. Right: mean Moran's I against the lowest detection fraction over the three sections; the selected features (orange) pass both criteria (`scripts/make_analysis_figures.py`).*
+
+#### scanpy's highly variable features
+In scRNA-seq, the usual choice is `sc.pp.highly_variable_genes`. None of its flavors computes the LBA score, but `flavor="seurat"` with `batch_key` does something related. For each section, it computes the dispersion (variance over mean) of every feature, standardizes it among features of similar mean, and calls the top features highly variable; features are then ranked first by the number of sections in which they are highly variable. Like the LBA score, this rewards variance within sections that is consistent between sections. Unlike the LBA score, it does not depend on the intensity scale. The flavor expects log values (it reverses the log with `expm1` internally; on normalized intensities in the thousands this overflows and the call fails), hence the layer:
+
+```python
+detected = adata[:, adata.var["det_min"] >= 0.05].copy()      # see below for why the detection filter comes first
+sc.pp.highly_variable_genes(detected, layer="log1p", flavor="seurat", batch_key=section, n_top_genes=500)
+hvf = detected.var_names[detected.var["highly_variable"]]
+```
+
+High dispersion is not the same as spatial structure, though. In MSI, much of the pixel-to-pixel variance comes from ion statistics, matrix crystals and single bright pixels. On the zebrafish sections, half of the 944 top-ranked features (497) are detected in less than 5% of the tissue pixels of some section: sparse features have a high dispersion. Among the 2,637 features detected in at least 5% of the tissue pixels of every section, the standardized dispersion is not correlated with Moran's I (Spearman ρ = 0.00); 56% of the 500 top-ranked features have a mean Moran's I above 0.4, against 36% of all 2,637. Use highly variable features only after a detection filter, and together with Moran's I (e.g. to cap the number of features), not in place of it.
 
 ### 3-2 Dimensionality reduction and data integration
 <sub><a href="#top">(Back to top)</a></sub></br>
