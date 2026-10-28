@@ -1771,7 +1771,8 @@ The LBA heuristic is then:
 ```python
 # the LBA z-scores every feature over all pixels first: section variances relative to the total variance
 import scipy.sparse as sp
-M = sp.csr_matrix(adata.layers["tic_curated"], dtype=np.float64)      # works for sparse and dense layers
+M = sp.csr_matrix(adata.layers["tic_curated"])      # element-wise .power() for dense and sparse layers alike;
+                                                     # on a scipy sparse matrix, M ** 2 is the matrix product M @ M
 total_var = np.asarray(M.power(2).mean(axis=0)).ravel() - np.asarray(M.mean(axis=0)).ravel() ** 2
 sec_var_z = sec_var / total_var
 score = sec_var_z.mean() - sec_var_z.var(ddof=0) / 2   # over sections: mean minus half the variance of the section variances
