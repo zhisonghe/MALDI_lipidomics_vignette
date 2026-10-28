@@ -143,7 +143,7 @@ hr { border: none; border-top: 1px solid var(--rule); }
       <header class="masthead">
         <p class="eyebrow">MALDI-MSI &middot; spatial lipidomics &middot; m/z, pixels and lipids</p>
         <h1>Tutorial for MALDI mass spectrometry imaging (spatial lipidomics) data preprocessing and analysis</h1>
-        <p class="meta">Draft compiled on 27 Sep 2026, revised on 26 Oct 2026 &middot; version 840e71a (2026-10-28) &middot; 22 sections &middot; companion files: <code>envs/</code>, <code>scripts/</code>, <code>figures/</code></p>
+        <p class="meta">Draft compiled on 27 Sep 2026, revised on 26 Oct 2026 &middot; version bfe6b6a (2026-10-28) &middot; 22 sections &middot; companion files: <code>envs/</code>, <code>scripts/</code>, <code>figures/</code></p>
         <details class="toc-mobile"><summary>Contents</summary><ul>
 <li class="l2"><a href="#introduction">Introduction</a></li>
 <li class="l2"><a href="#preparation">Preparation</a></li>
@@ -2209,7 +2209,8 @@ morans = pd.DataFrame(morans)                        # features x sections
 <p>The LBA heuristic is then:</p>
 <pre><code class="language-python"># the LBA z-scores every feature over all pixels first: section variances relative to the total variance
 import scipy.sparse as sp
-M = sp.csr_matrix(adata.layers[&quot;tic_curated&quot;], dtype=np.float64)      # works for sparse and dense layers
+M = sp.csr_matrix(adata.layers[&quot;tic_curated&quot;])      # element-wise .power() for dense and sparse layers alike;
+                                                     # on a scipy sparse matrix, M ** 2 is the matrix product M @ M
 total_var = np.asarray(M.power(2).mean(axis=0)).ravel() - np.asarray(M.mean(axis=0)).ravel() ** 2
 sec_var_z = sec_var / total_var
 score = sec_var_z.mean() - sec_var_z.var(ddof=0) / 2   # over sections: mean minus half the variance of the section variances
