@@ -1029,6 +1029,15 @@ import scanpy as sc
 # adata: tissue pixels of all samples x curated features, raw summed intensities in adata.X (dense or sparse)
 adata.layers["raw"] = adata.X.copy()                # keep the measured values (2-9)
 sc.pp.normalize_total(adata, target_sum=None)       # X = raw / TIC over the curated features x median TIC
+adata.layers["tic_curated"] = adata.X.copy()        # X will change (log transform in 3-1); this copy does not
+```
+
+The layer names say how the values were made: `tic_curated` is TIC over the curated features. With another normalization, name the layer after it (e.g. `rms_curated`). For comparison, the full-spectrum TIC version can be kept as well, from the total of each spectrum that `requantify()` stores in `obs["tic_spectrum"]` (2-4):
+
+```python
+import numpy as np, scipy.sparse as sp
+tic_spec = adata.obs["tic_spectrum"].to_numpy()
+adata.layers["tic_spectrum"] = sp.diags(np.median(tic_spec) / tic_spec) @ adata.layers["raw"]
 ```
 
 The same by hand, together with RMS and PQN normalization, for which scanpy has no function:
@@ -1069,12 +1078,14 @@ import numpy as np, pandas as pd
 # low: pixels x m/z windows, obsm["low_centroid"] of the requantified acquisitions, stacked like X (raw counts)
 # window: m/z window of each feature (var["window"]); acq: acquisition of each pixel
 # pix_factor: the factor each pixel was multiplied by above, e.g. np.median(tic) / tic
+# X: the normalized values, dense (layers["tic_curated"] above)
 low_scaled = pd.DataFrame(low * pix_factor[:, None])
 per_acq = low_scaled.groupby(np.asarray(acq)).median()           # acquisitions x windows, on the analysis scale
 print((per_acq.max() / per_acq.min()).describe())                # how much acquisitions differ, per window
 thr = np.nan_to_num(per_acq.max().reindex(window).to_numpy(), nan=0.0)
 X_cens = np.where(X >= thr[None, :], X, 0)                        # censored copy; X itself is kept
 print("nonzero values kept:", round((X_cens > 0).sum() / (X > 0).sum(), 3))
+adata.layers["tic_curated_censored"] = X_cens
 ```
 
 The censored copy deliberately discards low values in the more sensitive acquisitions (in the zebrafish example, 57% of the nonzero values remained), so use it to check conclusions, not as the primary data. Varying the quantile or the window width shows how strongly a result depends on these choices. When the acquisitions differ several-fold, re-acquiring under matched conditions is better than any correction.
@@ -1573,7 +1584,7 @@ Analysis tools (scanpy, squidpy, statistical models) expect one table, with one 
 What goes where:
 * `obs`, one row per pixel: the acquisition and its sample-level metadata (sample or animal, sex, condition, slide, run, section index for serial sections), the pixel coordinates, the tissue mask (2-2) and the tissue piece or region label, and, after registration (2-7), atlas or histology coordinates and regions;
 * `var`, one row per feature: the m/z, the matching and requantification details (2-4), the QC metrics and filter flags (2-5) and the annotation (2-8). Values that differ between acquisitions (interval bounds, whether the feature was called) get one column per acquisition;
-* `X` and `layers`: the raw summed intensities and the normalized values (2-6); see the end of this section for which versions to keep;
+* `X` and `layers`: the raw summed intensities (`raw`, 2-4), the normalized values (`tic_curated`, and `tic_spectrum` if kept, 2-6) and the censored copy (`tic_curated_censored`, 2-6). `X` is a copy of `tic_curated` when the table is written; section 3 replaces it by log values and reads the normalized values from `layers["tic_curated"]`. See the end of this section for which versions to keep;
 * `obsm`: the pixel coordinates (`spatial`), and later embeddings;
 * `uns`: the parameters and software versions used, so that the table records how it was made.
 
@@ -1627,7 +1638,10 @@ adata.obsm["spatial"] = adata.obs[["x", "y"]].to_numpy(float)
 adata.uns["provenance"] = {
     "date": datetime.date.today().isoformat(),
     "packages": {p: md.version(p) for p in ["anndata", "numpy", "scipy", "scanpy", "pyimzML"]},
-    "layers": {"X": "TIC over the curated features (2-6)", "raw": "summed intensities (2-4)"},
+    "layers": {"X": "copy of tic_curated", "raw": "summed intensities (2-4)",
+               "tic_curated": "raw / TIC over the curated features x median TIC (2-6)",
+               "tic_spectrum": "raw / full-spectrum TIC x median (2-6, for comparison)",
+               "tic_curated_censored": "tic_curated censored per m/z window (2-6, sensitivity analysis only)"},
     "parameters": {"matching_ppm": 2.0, "detection": 0.05, "annotation_ppm": 1.0},   # the values you used
 }
 adata.write_h5ad("msi_preprocessed.h5ad", compression="gzip")
@@ -1685,7 +1699,7 @@ Images (TIC, selected ion images, histology) are added the same way with `Image2
 
 **What a zero means, and which values to keep.** Distinguish four states of a missing value: *off-tissue* (removed by the mask), *not measured* (a feature not called or not matched in an acquisition), *measured but not retained* (no centroid above the instrument's threshold; a zero in a measured spectrum), and *truly absent*, which in a single pixel cannot be told apart from the previous one. Requantification (2-4) removes the not-measured state; the censoring diagnostic and censored copy (2-6) show how much the meaning of a zero differs between acquisitions. If you skip requantification, store a per-acquisition `measured` mask (or NaN for unmeasured blocks) and make detection fractions, pseudo-bulk means and normalization factors use only measured blocks: uMAIA's Zarr store, for example, simply has no array for an unmatched acquisition, which a naive loop turns into zeros.
 
-Keep **three versions** of the intensities in the object, and be explicit about which one each analysis uses: (i) the normalized measured values (`adata.X`, or a layer), (ii) values used only for clustering (e.g. batch-corrected reconstructions, `obsm`), and (iii) imputed values (a separate `obsm`/layer, with a flag per feature). Mixing them up is a common source of false conclusions in MSI analysis (see 3-4).
+Keep **three versions** of the intensities in the object, and be explicit about which one each analysis uses: (i) the normalized measured values (`layers["tic_curated"]`, and `X` until it is log-transformed in 3-1), (ii) values used only for clustering (e.g. batch-corrected reconstructions, `obsm`), and (iii) imputed values (a separate `obsm`/layer, with a flag per feature). Mixing them up is a common source of false conclusions in MSI analysis (see 3-4).
 
 ## Analysis of spatial lipidomics data
 <sub><a href="#top">(Back to top)</a></sub></br>
@@ -1715,18 +1729,17 @@ prep.save_msi_dataset()
 (Note that the EUCLID tutorial uses `moran_threshold=0.25` while the LBA notebooks used 0.4.)
 
 #### Without EUCLID (scanpy and squidpy)
-Start from the table written in 2-9. Its `X` holds the normalized intensities (2-6) without a log transform. As in scRNA-seq, log-transform `X` first, after keeping the normalized values in a layer. Several steps need the normalized values themselves: the LBA score and Moran's I below (computed on them in 2-5 as well), NMF (3-2), and all comparisons of intensities (3-4 to 3-6). The per-section summaries come from `sc.get.aggregate`:
+Start from the table written in 2-9. Its `X` is a copy of the normalized intensities in `layers["tic_curated"]` (2-6), without a log transform. As in scRNA-seq, log-transform `X` first; the normalized values stay in the layer. Several steps need them: the LBA score and Moran's I below (computed on them in 2-5 as well), NMF (3-2), and all comparisons of intensities (3-4 to 3-6). The per-section summaries come from `sc.get.aggregate`:
 
 ```python
 import numpy as np, pandas as pd, scanpy as sc
 
 adata = sc.read_h5ad("msi_preprocessed.h5ad")        # tissue pixels x features, X = normalized intensities (2-9)
-adata.layers["normalized"] = adata.X.copy()          # the normalized values, kept before the log transform
-sc.pp.log1p(adata)
+sc.pp.log1p(adata)                                   # X = log(1 + tic_curated); layers["tic_curated"] is unchanged
 section = "sample"                                   # obs column with one value per section (acquisition)
 
 # per section and feature: mean, variance and detection fraction
-agg = sc.get.aggregate(adata, by=section, func=["mean", "var", "count_nonzero"], layer="normalized")
+agg = sc.get.aggregate(adata, by=section, func=["mean", "var", "count_nonzero"], layer="tic_curated")
 sec_mean = pd.DataFrame(agg.layers["mean"], index=agg.obs_names, columns=agg.var_names)
 sec_var = pd.DataFrame(agg.layers["var"], index=agg.obs_names, columns=agg.var_names)
 det = pd.DataFrame(agg.layers["count_nonzero"] / agg.obs[["n_obs_aggregated"]].to_numpy(),
@@ -1748,7 +1761,7 @@ morans = {}
 for s in agg.obs_names:
     S = adata[adata.obs[section] == s].copy()
     sq.gr.spatial_neighbors(S, coord_type="grid", n_neighs=4)
-    sq.gr.spatial_autocorr(S, mode="moran", n_perms=None, layer="normalized")
+    sq.gr.spatial_autocorr(S, mode="moran", n_perms=None, layer="tic_curated")
     morans[s] = S.uns["moranI"]["I"].reindex(adata.var_names)
 morans = pd.DataFrame(morans)                        # features x sections
 ```
@@ -1786,7 +1799,7 @@ selected_hvf = adata.var_names[adata.var["highly_variable"] & (adata.var["moran_
 ```
 
 Two settings differ from the scRNA-seq defaults:
-* the flavor expects log values in `X`: it reverses the log with `expm1` internally, and on normalized intensities in the thousands (e.g. `layer="normalized"`) this overflows and the call fails;
+* the flavor expects log values in `X`: it reverses the log with `expm1` internally, and on normalized intensities in the thousands (e.g. `layer="tic_curated"`) this overflows and the call fails;
 * the default cutoffs (`min_mean=0.0125`, `max_mean=3`, `min_disp=0.5`) were set for log-transformed counts normalized to 10,000 per cell. The mean cutoffs depend on the intensity scale, and there is no reason to exclude abundant lipids: on the zebrafish sections, `max_mean=3` would remove 1,540 of the 2,637 features detected in every section. Turn them off; the detection filter already removes rarely detected features. The dispersion cutoff `min_disp=0.5` applies to the standardized dispersion and does not depend on the scale.
 
 Because the dispersion is averaged, a feature that is very variable in one section can pass. For strict consistency, require the feature to be highly variable in every section (`detected.var["highly_variable_intersection"]`). Alternatively, `n_top_genes` fixes the number of features instead of the cutoff; it ignores `min_mean`, `max_mean` and `min_disp`, and ranks features first by the number of sections in which they are highly variable.
@@ -1836,7 +1849,7 @@ The same in generic scanpy terms (environment `msi-analysis`):
 import scanpy as sc, numpy as np, harmonypy as hm
 from sklearn.decomposition import NMF
 
-Xsel = adata[:, selected].layers["normalized"]   # non-negative normalized intensities, not log (3-1)
+Xsel = adata[:, selected].layers["tic_curated"]   # non-negative normalized intensities, not log (3-1)
 Xsel = Xsel.toarray() if hasattr(Xsel, "toarray") else np.asarray(Xsel)
 Xsel = Xsel / np.percentile(Xsel, 99, axis=0).clip(1e-12)   # comparable scales: abundant lipids do not dominate
 assert Xsel.min() >= 0, "NMF needs non-negative input"
@@ -1948,7 +1961,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 
 held_out = "section 26"
 train = (adata.obs["sample"] != held_out).to_numpy()
-y = adata[:, lipid].layers["normalized"]
+y = adata[:, lipid].layers["tic_curated"]
 y = (y.toarray() if hasattr(y, "toarray") else np.asarray(y)).ravel()
 model = HistGradientBoostingRegressor(max_iter=300, learning_rate=0.05, random_state=0)
 model.fit(adata.obsm["X_harmony"][train], y[train])
@@ -1981,7 +1994,7 @@ A cluster is only a label. To make it useful, describe what distinguishes it (ma
 ```python
 import numpy as np, pandas as pd
 # measured (not imputed or batch-corrected) values (2-9), scaled 0-1 per lipid between its 0.5 and 99.5 percentiles
-M = adata.layers["normalized"]
+M = adata.layers["tic_curated"]
 M = M.toarray() if hasattr(M, "toarray") else np.asarray(M)
 lo, hi = np.percentile(M, 0.5, axis=0), np.percentile(M, 99.5, axis=0)
 adata.layers["measured_scaled"] = np.clip((M - lo) / np.where(hi > lo, hi - lo, 1), 0, 1)
@@ -2040,9 +2053,10 @@ import statsmodels.formula.api as smf
 from statsmodels.stats.multitest import multipletests
 
 # one row per pixel: the measured, normalized values (3-1; not log, not imputed) plus the metadata columns
+# (for the censored copy of 2-6: layer="tic_curated_censored")
 # (if there is no Sex column, drop "Sex" from the grouping keys here and below)
 lipids = list(adata.var_names)                                     # or the lipids to test
-df = adata.obs[["Sample", "SectionID", "Condition", "Sex", "lipizone"]].join(adata.to_df(layer="normalized"))
+df = adata.obs[["Sample", "SectionID", "Condition", "Sex", "lipizone"]].join(adata.to_df(layer="tic_curated"))
 pb = (df.groupby(["Sample", "Condition", "Sex", "lipizone"], observed=True)[lipids]
         .mean().reset_index())                                     # one row per animal x lipizone
 pb["Condition"] = pd.Categorical(pb["Condition"], categories=["control", "treated"])  # reference first
