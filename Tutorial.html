@@ -143,7 +143,7 @@ hr { border: none; border-top: 1px solid var(--rule); }
       <header class="masthead">
         <p class="eyebrow">MALDI-MSI &middot; spatial lipidomics &middot; m/z, pixels and lipids</p>
         <h1>Tutorial for MALDI mass spectrometry imaging (spatial lipidomics) data preprocessing and analysis</h1>
-        <p class="meta">Draft compiled on 27 Sep 2026, revised on 26 Oct 2026 &middot; version 5070905 (2026-10-28) &middot; 22 sections &middot; companion files: <code>envs/</code>, <code>scripts/</code>, <code>figures/</code></p>
+        <p class="meta">Draft compiled on 27 Sep 2026, revised on 26 Oct 2026 &middot; version c9015e5 (2026-10-28) &middot; 22 sections &middot; companion files: <code>envs/</code>, <code>scripts/</code>, <code>figures/</code></p>
         <details class="toc-mobile"><summary>Contents</summary><ul>
 <li class="l2"><a href="#introduction">Introduction</a></li>
 <li class="l2"><a href="#preparation">Preparation</a></li>
@@ -2217,7 +2217,42 @@ selected_hvf = adata.var_names[adata.var[&quot;highly_variable&quot;] &amp; (ada
 <li>the default cutoffs (<code>min_mean=0.0125</code>, <code>max_mean=3</code>, <code>min_disp=0.5</code>) were set for log-transformed counts normalized to 10,000 per cell. The mean cutoffs depend on the intensity scale, and there is no reason to exclude abundant lipids: on the zebrafish sections, <code>max_mean=3</code> would remove 1,540 of the 2,637 features detected in every section. Turn them off; the detection filter already removes rarely detected features. The dispersion cutoff <code>min_disp=0.5</code> applies to the standardized dispersion and does not depend on the scale.</li>
 </ul>
 <p>Because the dispersion is averaged, a feature that is very variable in one section can pass. For strict consistency, require the feature to be highly variable in every section (<code>detected.var[&quot;highly_variable_intersection&quot;]</code>). Alternatively, <code>n_top_genes</code> fixes the number of features instead of the cutoff; it ignores <code>min_mean</code>, <code>max_mean</code> and <code>min_disp</code>, and ranks features first by the number of sections in which they are highly variable.</p>
-<p>On the zebrafish sections, 808 of the 2,637 detected features are called highly variable (468 in all three sections). The standardized dispersion is only weakly correlated with mean Moran's I (Spearman ρ = 0.23): the two criteria measure different things, pixel-to-pixel variance and spatial structure, so Moran's I is still needed. Of the 808 features, 389 also have a mean Moran's I above 0.4. The LBA score at the scale of these data keeps 1 feature (<code>keep_lba</code> above). Like the 0.4 for Moran's I, <code>min_disp</code> is a choice; check the images of features just above and just below both cutoffs.</p>
+<p>On the zebrafish sections, 808 of the 2,637 detected features are called highly variable (468 in all three sections). For comparison with the LBA score, the table ranks the same 2,637 features by the score and takes the top 808, at the scale of the data and after multiplying all intensities by a small constant:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Criterion (on the 2,637 detected features)</th>
+<th>Spearman ρ with mean intensity</th>
+<th>Spearman ρ with mean Moran's I</th>
+<th>Features with score &gt; 0</th>
+<th>Of the top 808: mean Moran's I &gt; 0.4</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standardized dispersion (<code>flavor=&quot;seurat&quot;</code>)</td>
+<td>0.08</td>
+<td>0.23</td>
+<td>-</td>
+<td>389</td>
+</tr>
+<tr>
+<td>LBA score, intensities × 1e-4</td>
+<td>0.96</td>
+<td>0.79</td>
+<td>2,637</td>
+<td>661</td>
+</tr>
+<tr>
+<td>LBA score, intensities × 1 (TIC scale)</td>
+<td>-0.84</td>
+<td>-0.67</td>
+<td>18</td>
+<td>51</td>
+</tr>
+</tbody>
+</table></div>
+<p>At a small scale, the mean of the variances dominates the score, and the score ranks features by their variance within sections, which follows abundance. At the scale of the data, the variance of the variances dominates, and the ranking reverses. In neither case does the score measure consistency between sections independently of abundance. Its agreement with Moran's I at a small scale also comes from abundance: Moran's I itself is correlated with mean intensity (ρ = 0.78), because abundant lipids have a better signal-to-noise ratio. The standardized dispersion is independent of abundance by construction and only weakly correlated with Moran's I, so it adds information that Moran's I does not have. The two criteria measure different things, pixel-to-pixel variance and spatial structure, and both are needed; 389 features pass both (<code>selected_hvf</code>). Like the 0.4 for Moran's I, <code>min_disp</code> is a choice; check the images of features just above and just below both cutoffs.</p>
 <h3 id="3-2-dimensionality-reduction-and-data-integration">3-2 Dimensionality reduction and data integration</h3>
 <p>Each pixel has hundreds of feature values, many of them correlated (lipids of one class or one cell type co-vary) and noisy. Clustering and visualization work better on a few components that summarize this co-variation, which is what dimensionality reduction provides. When pixels come from many sections, slides or animals, technical differences between them also show up in these components, and pixels then group by section rather than by tissue type. Integration removes such differences from the embedding (not from the measured values).</p>
 <p><strong>NMF.</strong> MSI intensities are non-negative, and lipids co-vary in groups (e.g. myelin lipids), so non-negative matrix factorization gives interpretable components (&quot;lipid programs&quot;). The LBA used a <em>seeded</em> NMF: build the absolute lipid-lipid correlation graph, run Leiden over resolutions 0.8-1.5 and pick the resolution maximizing <code>Q^0.7 * log(C + 1)</code> (Q modularity, C number of lipid communities; 16 in the LBA), initialize one factor per community with its most central lipid, fit NMF on the reference brain, and project all other brains with the fixed loadings.</p>
