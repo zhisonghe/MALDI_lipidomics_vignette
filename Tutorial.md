@@ -1780,7 +1780,15 @@ Two settings differ from the scRNA-seq defaults:
 
 Because the dispersion is averaged, a feature that is very variable in one section can pass. For strict consistency, require the feature to be highly variable in every section (`detected.var["highly_variable_intersection"]`). Alternatively, `n_top_genes` fixes the number of features instead of the cutoff; it ignores `min_mean`, `max_mean` and `min_disp`, and ranks features first by the number of sections in which they are highly variable.
 
-On the zebrafish sections, 808 of the 2,637 detected features are called highly variable (468 in all three sections). The standardized dispersion is only weakly correlated with mean Moran's I (Spearman ρ = 0.23): the two criteria measure different things, pixel-to-pixel variance and spatial structure, so Moran's I is still needed. Of the 808 features, 389 also have a mean Moran's I above 0.4. The LBA score at the scale of these data keeps 1 feature (`keep_lba` above). Like the 0.4 for Moran's I, `min_disp` is a choice; check the images of features just above and just below both cutoffs.
+On the zebrafish sections, 808 of the 2,637 detected features are called highly variable (468 in all three sections). For comparison with the LBA score, the table ranks the same 2,637 features by the score and takes the top 808, at the scale of the data and after multiplying all intensities by a small constant:
+
+| Criterion (on the 2,637 detected features) | Spearman ρ with mean intensity | Spearman ρ with mean Moran's I | Features with score > 0 | Of the top 808: mean Moran's I > 0.4 |
+|---|---|---|---|---|
+| Standardized dispersion (`flavor="seurat"`) | 0.08 | 0.23 | - | 389 |
+| LBA score, intensities × 1e-4 | 0.96 | 0.79 | 2,637 | 661 |
+| LBA score, intensities × 1 (TIC scale) | -0.84 | -0.67 | 18 | 51 |
+
+At a small scale, the mean of the variances dominates the score, and the score ranks features by their variance within sections, which follows abundance. At the scale of the data, the variance of the variances dominates, and the ranking reverses. In neither case does the score measure consistency between sections independently of abundance. Its agreement with Moran's I at a small scale also comes from abundance: Moran's I itself is correlated with mean intensity (ρ = 0.78), because abundant lipids have a better signal-to-noise ratio. The standardized dispersion is independent of abundance by construction and only weakly correlated with Moran's I, so it adds information that Moran's I does not have. The two criteria measure different things, pixel-to-pixel variance and spatial structure, and both are needed; 389 features pass both (`selected_hvf`). Like the 0.4 for Moran's I, `min_disp` is a choice; check the images of features just above and just below both cutoffs.
 
 ### 3-2 Dimensionality reduction and data integration
 <sub><a href="#top">(Back to top)</a></sub></br>
