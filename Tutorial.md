@@ -1715,7 +1715,7 @@ prep.save_msi_dataset()
 (Note that the EUCLID tutorial uses `moran_threshold=0.25` while the LBA notebooks used 0.4.)
 
 #### Without EUCLID (scanpy and squidpy)
-Start from the table written in 2-9. Its `X` holds the normalized intensities (2-6) without a log transform. As in scRNA-seq, log-transform `X` first, after keeping the normalized values in a layer. Several steps need the normalized values themselves: the LBA score and Moran's I below (computed on them in 2-5 as well), NMF (3-2), and all comparisons of intensities (3-4 to 3-6). The per-section summaries come from `sc.get.aggregate`, and Moran's I per section from squidpy:
+Start from the table written in 2-9. Its `X` holds the normalized intensities (2-6) without a log transform. As in scRNA-seq, log-transform `X` first, after keeping the normalized values in a layer. Several steps need the normalized values themselves: the LBA score and Moran's I below (computed on them in 2-5 as well), NMF (3-2), and all comparisons of intensities (3-4 to 3-6). The per-section summaries come from `sc.get.aggregate`:
 
 ```python
 import numpy as np, pandas as pd, scanpy as sc, squidpy as sq
@@ -1731,8 +1731,17 @@ sec_mean = pd.DataFrame(agg.layers["mean"], index=agg.obs_names, columns=agg.var
 sec_var = pd.DataFrame(agg.layers["var"], index=agg.obs_names, columns=agg.var_names)
 det = pd.DataFrame(agg.layers["count_nonzero"] / agg.obs[["n_obs_aggregated"]].to_numpy(),
                    index=agg.obs_names, columns=agg.var_names)
+```
 
-# Moran's I per section, rook neighbourhood on the pixel raster (skip if 2-5 stored it in adata.var)
+Moran's I per section was computed in 2-5. If the table holds it in `var`, one column per section, read it from there (the column names depend on how you built the table in 2-9):
+
+```python
+morans = adata.var[[f"moran_{s}" for s in agg.obs_names]].set_axis(agg.obs_names, axis=1)   # features x sections
+```
+
+Otherwise, compute it here with squidpy, on the normalized values and a rook neighbourhood on the pixel raster as in 2-5:
+
+```python
 morans = {}
 for s in agg.obs_names:
     S = adata[adata.obs[section] == s].copy()
