@@ -1867,7 +1867,8 @@ from sklearn.decomposition import NMF
 
 Xsel = adata[:, selected].layers["tic_curated"]   # non-negative normalized intensities, not log (3-1)
 Xsel = Xsel.toarray() if hasattr(Xsel, "toarray") else np.asarray(Xsel)
-Xsel = Xsel / np.percentile(Xsel, 99, axis=0).clip(1e-12)   # comparable scales: abundant lipids do not dominate
+scale = np.percentile(Xsel, 99, axis=0).clip(1e-12)   # one value per feature; keep it to project new pixels
+Xsel = Xsel / scale                                    # comparable scales: abundant lipids do not dominate
 assert Xsel.min() >= 0, "NMF needs non-negative input"
 ref = (adata.obs["Condition"] == "control").values     # learn the factors on the reference set only
 nmf = NMF(n_components=16, init="nndsvda", random_state=0, max_iter=500)
