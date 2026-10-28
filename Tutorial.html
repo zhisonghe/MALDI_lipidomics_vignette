@@ -143,7 +143,7 @@ hr { border: none; border-top: 1px solid var(--rule); }
       <header class="masthead">
         <p class="eyebrow">MALDI-MSI &middot; spatial lipidomics &middot; m/z, pixels and lipids</p>
         <h1>Tutorial for MALDI mass spectrometry imaging (spatial lipidomics) data preprocessing and analysis</h1>
-        <p class="meta">Draft compiled on 27 Sep 2026, revised on 26 Oct 2026 &middot; version 1954457 (2026-10-28) &middot; 22 sections &middot; companion files: <code>envs/</code>, <code>scripts/</code>, <code>figures/</code></p>
+        <p class="meta">Draft compiled on 27 Sep 2026, revised on 26 Oct 2026 &middot; version 8cb6513 (2026-10-28) &middot; 22 sections &middot; companion files: <code>envs/</code>, <code>scripts/</code>, <code>figures/</code></p>
         <details class="toc-mobile"><summary>Contents</summary><ul>
 <li class="l2"><a href="#introduction">Introduction</a></li>
 <li class="l2"><a href="#preparation">Preparation</a></li>
@@ -568,6 +568,12 @@ R -e 'BiocManager::install(&quot;CardinalWorkflows&quot;)'
 <td><code>sc.pp.neighbors(...)</code> (3-2, 3-3)</td>
 <td>With pynndescent 0.7.0 (released 27 Oct 2026), <code>sc.pp.neighbors</code> of scanpy 1.12.4 fails with <code>'csr_array' object has no attribute 'getnnz'</code> once the data are large enough for approximate neighbours (tens of thousands of pixels); small data sets use exact neighbours and are not affected</td>
 <td>Install <code>pynndescent&lt;0.7</code> (pinned in <code>envs/msi-analysis.yml</code>) until scanpy supports it</td>
+</tr>
+<tr>
+<td>pandas / AnnData</td>
+<td><code>adata.write_h5ad(...)</code> (2-9 and any later save)</td>
+<td>From pandas 3, text columns and indexes are pandas string arrays. anndata 0.13 then writes them as nullable string arrays: anndata &lt; 0.11 cannot read these, and anndata 0.11-0.12 read them but refuse to write them back (<code>RuntimeError: anndata.settings.allow_write_nullable_strings is False</code>)</td>
+<td>Write files that others will read with <code>anndata.settings.allow_write_nullable_strings = False</code> set before writing (anndata &gt;= 0.13: the string format every version reads). If the error appears with anndata 0.11-0.12, set the setting to <code>True</code> before writing, or convert the indexes first (<code>adata.obs_names = adata.obs_names.astype(object)</code>, the same for <code>var_names</code>)</td>
 </tr>
 <tr>
 <td>harmonypy</td>
