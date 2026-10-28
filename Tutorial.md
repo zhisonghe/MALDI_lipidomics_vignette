@@ -1706,8 +1706,8 @@ Keep **three versions** of the intensities in the object, and be explicit about 
 
 ### 3-1 Feature selection
 <sub><a href="#top">(Back to top)</a></sub></br>
-As with highly variable genes in scRNA-seq, clustering works better on a subset of informative, well-measured features. For the LBA, "well-measured" meant consistent across serial sections. The LBA (notebook `004-FeatureSelectionForEmbedding`, reference brain only) computed for each feature
-* the mean of the section-wise variances (high = informative within sections),
+As with highly variable genes in scRNA-seq, clustering works better on a subset of informative, well-measured features. For the LBA, "well-measured" meant consistent across serial sections. The LBA (notebook `004-FeatureSelectionForEmbedding`, reference brain only) first z-scored every feature over all pixels (after setting values above 1, considered broken, to 1e-4), so that every feature has a total variance of 1, and then computed for each feature
+* the mean of the section-wise variances (high = the variance lies within sections rather than between section means),
 * the variance of the section-wise variances (high = inconsistent between sections, i.e. batch-affected), combined as `score = mean_of_vars - var_of_vars / 2`,
 * the mean Moran's I (> 0.4 required),
 * the number of sections in which the feature drops out (section mean < 1.5e-4; fewer than 4 dropouts allowed),
@@ -1716,7 +1716,7 @@ then clustered features in this score space with k-means (k = 10), inspected the
 
 ```python
 # prep (the EUCLID Preprocessing object) and final_table: created in 2-8; morans_df: prep.calculate_moran in 2-9
-prep.min0max1_normalize_clip()            # per-lipid 0-1 scaling for comparability
+prep.min0max1_normalize_clip()            # per-lipid 0-1 scaling, stored in obsm["X_01norm"] (not used below)
 prep.feature_selection(morans_df, modality="combined", moran_threshold=0.25,
                        cluster_k=10, output_csv="feature_scores.csv",
                        remove_untrustworthy=False)
@@ -1726,7 +1726,7 @@ reaction_df = prep.reaction_network(lipid_props_df)
 prep.save_msi_dataset()
 ```
 
-(Note that the EUCLID tutorial uses `moran_threshold=0.25` while the LBA notebooks used 0.4.)
+(Note that the EUCLID tutorial uses `moran_threshold=0.25` while the LBA notebooks used 0.4.) `feature_selection` computes the score as the notebook did, including the replacement of values above 1 by 1e-4, on `adata.X`. This assumes the scale of uMAIA-normalized values; on TIC-normalized intensities nearly all values are above 1 and would be replaced. The dropout threshold (1.5e-4) is on the same scale.
 
 #### Without EUCLID (scanpy and squidpy)
 Start from the table written in 2-9. Its `X` is a copy of the normalized intensities in `layers["tic_curated"]` (2-6), without a log transform. As in scRNA-seq, log-transform `X` first; the normalized values stay in the layer. Several steps need them: the LBA score and Moran's I below (computed on them in 2-5 as well), NMF (3-2), and all comparisons of intensities (3-4 to 3-6). The per-section summaries come from `sc.get.aggregate`:
@@ -1769,12 +1769,16 @@ morans = pd.DataFrame(morans)                        # features x sections
 The LBA heuristic is then:
 
 ```python
-score = sec_var.mean() - sec_var.var() / 2           # over sections: mean minus half the variance of the within-section variance
-dropouts = (sec_mean < 1.5e-4).sum()
+# the LBA z-scores every feature over all pixels first: section variances relative to the total variance
+adata.obs["all_pixels"] = "all"
+total_var = sc.get.aggregate(adata, by="all_pixels", func="var", layer="tic_curated").layers["var"][0]
+sec_var_z = sec_var / total_var
+score = sec_var_z.mean() - sec_var_z.var(ddof=0) / 2   # over sections: mean minus half the variance of the section variances
+dropouts = (sec_mean < 1.5e-4).sum()                  # 1.5e-4 is on the uMAIA scale; on other scales use det
 keep_lba = (morans.mean(axis=1) > 0.4) & (dropouts < 4) & (score > 0)
 ```
 
-The score subtracts quantities with different units (a variance and a variance of variances), so its value and the `score > 0` cutoff depend on the intensity scale. For new data, use separate criteria with their own meaning instead, such as within-sample variance, recurrence, spatial structure and replicate reproducibility. Here, spatial structure and detection in every section:
+Because every feature is z-scored, its total variance is 1, and the mean of the section variances is the share of its variance that lies within sections rather than between section means. The score is therefore high for features whose variance lies within sections and is similar in all sections, and it does not depend on the intensity scale. It does not say whether this variance is spatial structure or noise; that is what Moran's I adds. The cutoff `score > 0` removes few features; in the LBA, the selection came from the k-means clusters in score space and the inspection of their images. For new data, use criteria that can be read on their own, such as recurrence, spatial structure and replicate reproducibility. Here, spatial structure and detection in every section:
 
 ```python
 adata.var["moran_mean"] = morans.mean(axis=1)
@@ -1783,13 +1787,13 @@ adata.var["selected"] = (adata.var["moran_mean"] > 0.4) & (adata.var["det_min"] 
 selected = adata.var_names[adata.var["selected"]]    # the features used for the embedding (3-2)
 ```
 
-On the three zebrafish sections of 1-5, preprocessed as for the figures of section 2 (5,486 features detected in at least 5% of the tissue pixels of one section, TIC-normalized), the score behaves exactly like this: multiplying all intensities by a constant changes the fraction of features with a positive score from almost all to almost none (Figure 3-1, left). Separate criteria do not have this problem. 944 features have a mean Moran's I above 0.4 and are detected in at least 5% of the tissue pixels of every section (right). The figures below use 943 of them; one is kept out of the embedding to be restored from it in 3-4.
+On the three zebrafish sections of 1-5, preprocessed as for the figures of section 2 (5,486 features detected in at least 5% of the tissue pixels of one section, TIC-normalized), 2,635 of the 2,637 features detected in at least 5% of the tissue pixels of every section have a positive LBA score, and the score is not correlated with Moran's I (Spearman ρ = -0.08; Figure 3-1, left). 944 features have a mean Moran's I above 0.4 and are detected in at least 5% of the tissue pixels of every section (right). The figures below use 943 of them; one is kept out of the embedding to be restored from it in 3-4.
 
 ![Feature selection](figures/fig_3-1_features.png)
-*Figure 3-1. Left: fraction of the 5,486 zebrafish features with a positive LBA score after all intensities were multiplied by a constant; the cutoff `score > 0` selects almost all or almost none of them depending on the scale. Right: mean Moran's I against the lowest detection fraction over the three sections; the selected features (orange) pass both criteria (`scripts/make_analysis_figures.py`).*
+*Figure 3-1. Left: LBA score (on z-scored features, as in the LBA) against mean Moran's I for the 2,637 zebrafish features detected in at least 5% of the tissue pixels of every section; dashed lines: the cutoffs `score > 0` and Moran's I > 0.4. Right: mean Moran's I against the lowest detection fraction over the three sections; the selected features (orange) pass both criteria (`scripts/make_analysis_figures.py`).*
 
 #### scanpy's highly variable features in place of the LBA score
-The idea behind the LBA score, variance within sections that is consistent between sections, can be kept without its dependence on the intensity scale. In scRNA-seq this is the job of `sc.pp.highly_variable_genes`. None of its flavors computes the LBA score, but `flavor="seurat"` with `batch_key` does something close: for each section, it computes the dispersion (variance over mean) of every feature and standardizes it among features of similar mean; it then averages the standardized dispersion over sections and calls features above a cutoff highly variable. It replaces the score; detection and Moran's I remain separate criteria:
+In scRNA-seq, informative features are chosen with `sc.pp.highly_variable_genes`. None of its flavors computes the LBA score, but `flavor="seurat"` with `batch_key` is related: for each section, it computes the dispersion (variance over mean) of every feature and standardizes it among features of similar mean; it then averages the standardized dispersion over sections and calls features above a cutoff highly variable. Like the LBA score, it looks at the variance within each section, combines the sections, and does not depend on the intensity scale. It differs in what the variance is compared with: the LBA score compares the variance of a feature within sections with its total variance, the standardized dispersion compares it with that of features of similar abundance. It can replace the score; detection and Moran's I remain separate criteria:
 
 ```python
 detected = adata[:, adata.var["det_min"] >= 0.05].copy()     # detection first: sparse features have a high dispersion
@@ -1804,15 +1808,15 @@ Two settings differ from the scRNA-seq defaults:
 
 Because the dispersion is averaged, a feature that is very variable in one section can pass. For strict consistency, require the feature to be highly variable in every section (`detected.var["highly_variable_intersection"]`). Alternatively, `n_top_genes` fixes the number of features instead of the cutoff; it ignores `min_mean`, `max_mean` and `min_disp`, and ranks features first by the number of sections in which they are highly variable.
 
-On the zebrafish sections, 808 of the 2,637 detected features are called highly variable (468 in all three sections). For comparison with the LBA score, the table ranks the same 2,637 features by the score and takes the top 808, at the scale of the data and after multiplying all intensities by a small constant:
+On the zebrafish sections, 808 of the 2,637 detected features are called highly variable (468 in all three sections). For comparison, the table ranks the same 2,637 features by the LBA score and takes the top 808:
 
-| Criterion (on the 2,637 detected features) | Spearman ρ with mean intensity | Spearman ρ with mean Moran's I | Features with score > 0 | Of the top 808: mean Moran's I > 0.4 |
-|---|---|---|---|---|
-| Standardized dispersion (`flavor="seurat"`) | 0.08 | 0.23 | - | 389 |
-| LBA score, intensities × 1e-4 | 0.96 | 0.79 | 2,637 | 661 |
-| LBA score, intensities × 1 (TIC scale) | -0.84 | -0.67 | 18 | 51 |
+| Criterion (on the 2,637 detected features) | Spearman ρ with mean intensity | Spearman ρ with mean Moran's I | Of the top 808: mean Moran's I > 0.4 |
+|---|---|---|---|
+| Standardized dispersion (`flavor="seurat"`) | 0.08 | 0.23 | 389 |
+| LBA score (z-scored features) | -0.29 | -0.08 | 221 |
+| (all 2,637 detected features) | | | 944 of 2,637 |
 
-At a small scale, the mean of the variances dominates the score, and the score ranks features by their variance within sections, which follows abundance. At the scale of the data, the variance of the variances dominates, and the ranking reverses. In neither case does the score measure consistency between sections independently of abundance. Its agreement with Moran's I at a small scale also comes from abundance: Moran's I itself is correlated with mean intensity (ρ = 0.78), because abundant lipids have a better signal-to-noise ratio. The standardized dispersion is independent of abundance by construction and only weakly correlated with Moran's I, so it adds information that Moran's I does not have. The two criteria measure different things, pixel-to-pixel variance and spatial structure, and both are needed; 389 features pass both (`selected_hvf`). Like the 0.4 for Moran's I, `min_disp` is a choice; check the images of features just above and just below both cutoffs.
+Neither score follows abundance closely, but they rank features differently. The top features of the LBA score have a mean Moran's I above 0.4 less often (27%) than the detected features overall (36%): a variance that lies evenly within sections can be spatial structure or noise. The standardized dispersion is weakly correlated with Moran's I, and its top features pass 0.4 more often (48%). Neither replaces Moran's I, which measures spatial structure directly; 389 features pass both the dispersion and the Moran's I criteria (`selected_hvf`). With only three sections, the variance of the section variances rests on three values each; with more sections, as in the LBA, both scores combine more sections and become more stable. Like the 0.4 for Moran's I, `min_disp` is a choice; check the images of features just above and just below both cutoffs.
 
 ### 3-2 Dimensionality reduction and data integration
 <sub><a href="#top">(Back to top)</a></sub></br>

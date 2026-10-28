@@ -43,7 +43,7 @@ def run(adata, out, batch="sample", name=None, resolution=1.0, n_components=16, 
     name = name if name is not None else adata.var["mz"].map(lambda m: f"m/z {m:.4f}")
     X = dense(adata.X).astype(np.float32)
 
-    # ---- 3-1 feature selection: Moran's I per sample (2-5), the LBA heuristic, and a standardized alternative
+    # ---- 3-1 feature selection: Moran's I per sample (2-5), the LBA score, and selection on separate criteria
     morans = pd.DataFrame(index=adata.var_names, columns=samples, dtype=float)
     for s in samples:
         S = adata[adata.obs[batch] == s].copy()
@@ -52,27 +52,28 @@ def run(adata, out, batch="sample", name=None, resolution=1.0, n_components=16, 
         sq.gr.spatial_autocorr(S, mode="moran", genes=S.var_names.tolist(), n_perms=None, show_progress_bar=False)
         morans[s] = S.uns["moranI"]["I"].reindex(adata.var_names)
     features = list(adata.var_names)
-    df = pd.DataFrame(X, columns=features, index=adata.obs_names).assign(Section=adata.obs[batch].to_numpy())
-    # the LBA heuristic as in 3-1, on the data at their own scale and after dividing all values by a constant
-    frac_pass = {}
-    for c in [1e-4, 1e-3, 1e-2, 1e-1, 1, 10]:
-        d = df[features] * c
-        sec_var = d.groupby(df["Section"]).var()
-        score = sec_var.mean() - sec_var.var() / 2
-        frac_pass[c] = float((score > 0).mean())
     det = pd.DataFrame({s: (X[(adata.obs[batch] == s).to_numpy()] > 0).mean(axis=0) for s in samples}, index=features)
     mean_moran = morans.mean(axis=1)
+    # the LBA score as in the LBA notebook and EUCLID: section variances of every feature z-scored over all pixels
+    total_var = X.var(axis=0, dtype=np.float64)
+    sv = np.vstack([X[(adata.obs[batch] == s).to_numpy()].var(axis=0, dtype=np.float64) for s in samples])
+    sv = sv / np.where(total_var > 0, total_var, np.nan)
+    lba = pd.Series(sv.mean(axis=0) - sv.var(axis=0) / 2, index=features)
+    everywhere = det.min(axis=1) >= 0.05
+    from scipy.stats import spearmanr
+    lba_num = {"detected_everywhere": int(everywhere.sum()), "score_pos": int((lba[everywhere] > 0).sum()),
+               "rho_moran": round(float(spearmanr(lba[everywhere], mean_moran[everywhere]).statistic), 2)}
     selected = mean_moran.index[(mean_moran > 0.4) & (det.min(axis=1) >= 0.05)]   # structured and detected everywhere
     # one well-detected, structured lipid is kept out of the embedding, to be restored from it in 3-4
     target = mean_moran[selected][det.loc[selected].min(axis=1) >= 0.3].sort_values().index
     target = target[int(0.75 * (len(target) - 1))]
     selected = selected.drop(target)
-    num.update(features=len(features), selected=len(selected), score_pass=frac_pass)
+    num.update(features=len(features), selected=len(selected), lba=lba_num)
     fig, ax = plt.subplots(1, 2, figsize=(11, 3.4))
-    ax[0].plot(list(frac_pass), list(frac_pass.values()), "o-", color=PAL[0], lw=2, ms=6)
-    ax[0].set_xscale("log"); ax[0].set_ylim(-0.03, 1.03)
-    ax[0].set(xlabel="all intensities multiplied by", ylabel="fraction of features with score > 0",
-              title="LBA score: the cutoff depends on the scale")
+    ax[0].scatter(lba[everywhere], mean_moran[everywhere], s=4, color=PAL[0], alpha=0.4, rasterized=True)
+    ax[0].axvline(0, color=MUTED, lw=0.8, ls="--"); ax[0].axhline(0.4, color=MUTED, lw=0.8, ls="--")
+    ax[0].set(xlabel="LBA score (z-scored features)", ylabel="mean Moran's I over samples",
+              title=f"LBA score vs Moran's I ({lba_num['detected_everywhere']} features detected everywhere)")
     ok = det.min(axis=1) >= 0.05
     ax[1].scatter(det.min(axis=1), mean_moran, s=4, color=MUTED, alpha=0.4, label="all QC'd features")
     ax[1].scatter(det.min(axis=1)[selected], mean_moran[selected], s=6, color=PAL[1], label=f"selected ({len(selected)})")
