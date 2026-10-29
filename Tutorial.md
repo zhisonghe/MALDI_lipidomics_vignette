@@ -1865,7 +1865,7 @@ The same in generic scanpy terms (environment `msi-analysis`):
 import scanpy as sc, numpy as np, harmonypy as hm
 from sklearn.decomposition import NMF
 
-Xsel = adata[:, selected].layers["tic_curated"]   # non-negative normalized intensities, not log (3-1)
+Xsel = adata[:, selected].layers["tic_curated"]   # normalized intensities, not log (see below)
 Xsel = Xsel.toarray() if hasattr(Xsel, "toarray") else np.asarray(Xsel)
 scale = np.percentile(Xsel, 99, axis=0).clip(1e-12)   # one value per feature; keep it to project new pixels
 Xsel = Xsel / scale                                    # comparable scales: abundant lipids do not dominate
@@ -1886,7 +1886,9 @@ else:
     raise ValueError(f"cannot determine the orientation of Z_corr {Z.shape}")
 ```
 
-Without a scale step like the one above, NMF mostly models the few most intense lipids, because it minimizes the squared error on the original values.
+NMF runs here on the normalized intensities, not on their log. Log values are non-negative too, so NMF would run on them; the reason is what the factors mean. NMF writes each pixel as a weighted sum of a few lipid programs. A pixel holds several cells and compartments, and their signals add up on the linear scale, so the factors can be read as the parts of this mixture. After a log transform, the profile of a mixture is no longer the sum of the profiles of its parts. The log also stretches the gap between undetected and weakly detected values, which reflects the detection limit more than biology (2-6), and how strongly it does so depends on the intensity scale. The LBA's NMF also runs on linear values.
+
+The cost of the linear scale is the weight of bright values. NMF minimizes the squared error on the values it is given, so without a scale step like the one above it mostly models the few most intense lipids. The per-feature scale removes this between lipids, but within a lipid the brightest pixels, including hot pixels and matrix clusters, still dominate the fit. Two fixes keep the linear scale: clip each lipid at a high percentile (after the scale step above, `Xsel = np.minimum(Xsel, 1)` clips at the 99th percentile), or use a loss that gives large values less weight, `NMF(..., beta_loss="kullback-leibler", solver="mu")`.
 
 In the zebrafish example, all three sections come from one embryo, so the reference set is all pixels, and Harmony is run on the section. Pixels already mix partly across sections: of the 15 nearest neighbours of a pixel in the NMF space, 69% come from its own section (34% would be expected with complete mixing, given the pixel numbers of the sections), and after Harmony 64% (Figure 3-2). The remaining separation is partly anatomy, because the sections cut the embryo at different depths; integration should not remove it.
 
